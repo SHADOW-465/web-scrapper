@@ -1,0 +1,6 @@
+legacy/
+data/
+exports/
+.sessions/
+.impeccable/
+tests/

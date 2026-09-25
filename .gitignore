@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+
+# Testing & Legacy scripts/apps
+tests/
+legacy/
+data/
+exports/
+.sessions/
+.impeccable/
+.claude/
+
+# Next.js build output
+.next/
+out/
+
+# TypeScript build cache
+*.tsbuildinfo
+next-env.d.ts
+
+# Vercel
+.vercel/
+
+# Environment variables
+.env
+.env*.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python caches (if any)
+__pycache__/
+*.py[cod]
+.venv/
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+~$*
+.vscode/
+.idea/
