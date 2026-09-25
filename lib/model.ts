@@ -91,10 +91,31 @@ export function openWorkspace(list: PageList, feeds: Feed[]): Workspace {
 
 /** A dataset that exists only in a feed (nothing on screen matched it). */
 export function openFeedWorkspace(feed: Feed): Workspace {
+  const priorityKeys = [
+    "name", "company", "person_name", "representative", "designation", "position", "role",
+    "stands.0.hall", "hall", "stands.0.stand", "stand", "country", "url", "profile_url",
+    "description", "about"
+  ];
   const fields = feed.fields.filter((f) => !f.plumbing && f.fill > 0.2);
-  const cols: Column[] = fields.map((f, i) => ({
-    id: `f-${f.key}`, name: f.label, ink: INKS[i % INKS.length], on: i < 6, feedKey: f.key, sample: f.sample,
-  }));
+  fields.sort((a, b) => {
+    const ai = priorityKeys.indexOf(a.key.toLowerCase());
+    const bi = priorityKeys.indexOf(b.key.toLowerCase());
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return 0;
+  });
+  const cols: Column[] = fields.map((f, i) => {
+    const isPriority = priorityKeys.includes(f.key.toLowerCase());
+    return {
+      id: `f-${f.key}`,
+      name: f.label,
+      ink: INKS[i % INKS.length],
+      on: isPriority ? i < 8 : i < 6,
+      feedKey: f.key,
+      sample: f.sample,
+    };
+  });
   uniqueNames(cols);
   return { listId: `feed:${feed.id}`, columns: cols, match: null, feedId: feed.id };
 }
@@ -184,6 +205,7 @@ export function pageOnly(ws: Workspace): Column[] {
 
 /** What a feed dataset should be called when nothing on screen names it. */
 export function feedTitle(feed: Feed): string {
+  if (feed.endpoint.includes("search/exhibitors")) return "Frankfurt Buchmesse Exhibitors";
   const segs = [...feed.jsonPath.split("."), ...feed.endpoint.split(/[\s/]/)].filter((s) => s && !/^\d+$/.test(s) && !/^(data|list|items|results|api|v\d+|get|post|search|output|records|rows)$/i.test(s) && !s.includes("."));
   const last = segs[segs.length - 1] ?? "data";
   return humanizeKey(last);

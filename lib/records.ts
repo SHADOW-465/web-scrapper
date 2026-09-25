@@ -123,6 +123,14 @@ export function detectPagination(url: string, body: Json): Pagination | null {
  * `stands.0.hall` -> "Hall", `company_name` -> "Company name", `isNew` -> "Is new".
  */
 export function humanizeKey(path: string): string {
+  if (path === "name" || path === "company") return "Company Name";
+  if (path === "person_name" || path === "representative") return "Representative Name";
+  if (path === "designation" || path === "job_title" || path === "role") return "Designation";
+  if (path === "stands.0.hall" || path === "hall") return "Hall";
+  if (path === "stands.0.stand" || path === "stand") return "Stand";
+  if (path === "country") return "Country";
+  if (path === "about" || path === "description") return "Description";
+  if (path === "url" || path === "profile_url") return "Profile URL";
   const parts = path.split(".").filter((p) => !/^\d+$/.test(p));
   const leaf = parts[parts.length - 1] ?? path;
   const words = leaf
@@ -136,7 +144,7 @@ export function humanizeKey(path: string): string {
 /** Fields that are plumbing, not information a person reads. */
 export function isPlumbing(path: string, sample: unknown): boolean {
   const leaf = path.split(".").pop()!.toLowerCase();
-  if (/(^|_)(id|uuid|guid|hash|key|token|order_num|sort|index)$/.test(leaf) || /Id$/.test(path.split(".").pop()!)) return true;
+  if (/(^|_)(id|uuid|guid|hash|key|token|order_num|sort|index|position)$/.test(leaf) || /Id$/.test(path.split(".").pop()!)) return true;
   if (/^(is|has|show|can)[A-Z_]/.test(path.split(".").pop()!)) return true;
   if (/(_count|\.count)$/.test(path)) return true;
   if (typeof sample === "boolean") return true;

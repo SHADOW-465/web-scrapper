@@ -4,7 +4,7 @@
  * they always act on current state, never on a stale closure.
  */
 import {
-  addFeedColumn, addPageColumn, openFeedWorkspace, openWorkspace,
+  addFeedColumn, addPageColumn, matchList, openFeedWorkspace, openWorkspace,
   type Feed, type FeedField, type PageColumn, type PageList, type Workspace,
 } from "./model";
 import type { RecipeColumn } from "./recipes";
@@ -74,21 +74,40 @@ export function reducer(s: State, a: Action): State {
       let active: string | null = null;
       const ws: Record<string, Workspace> = {};
       const pinned = a.prefer?.itemSelector ? lists.find((l) => l.itemSelector === a.prefer!.itemSelector) : undefined;
-      const first = pinned ?? lists[0];
-      if (first) {
-        let w = openWorkspace(first, s.feeds);
-        if (a.prefer?.columns?.length && pinned) w = applyRecipe(w, a.prefer.columns);
-        ws[first.id] = w;
-        active = first.id;
-      } else {
-        const feed = s.feeds.find((f) => a.prefer?.feedEndpoint && f.endpoint === a.prefer.feedEndpoint) ?? bestFeed(s.feeds);
-        if (feed) {
-          const id = `feed:${feed.id}`;
-          let w = openFeedWorkspace(feed);
-          if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
-          ws[id] = w;
-          active = id;
-        }
+
+      const richFeed = s.feeds.find((f) => a.prefer?.feedEndpoint ? f.endpoint === a.prefer.feedEndpoint : ((f.total && f.total > 15) || f.rows.length >= 10)) ?? bestFeed(s.feeds);
+      const listMatchingRichFeed = richFeed ? lists.find((l) => {
+        const m = matchList(l, [richFeed]);
+        return m && m.pairs.length > 0;
+      }) : undefined;
+
+      if (pinned) {
+        let w = openWorkspace(pinned, s.feeds);
+        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
+        ws[pinned.id] = w;
+        active = pinned.id;
+      } else if (listMatchingRichFeed) {
+        let w = openWorkspace(listMatchingRichFeed, s.feeds);
+        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
+        ws[listMatchingRichFeed.id] = w;
+        active = listMatchingRichFeed.id;
+      } else if (richFeed && (!lists[0] || lists[0].count <= 6)) {
+        const id = `feed:${richFeed.id}`;
+        let w = openFeedWorkspace(richFeed);
+        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
+        ws[id] = w;
+        active = id;
+      } else if (lists[0]) {
+        let w = openWorkspace(lists[0], s.feeds);
+        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
+        ws[lists[0].id] = w;
+        active = lists[0].id;
+      } else if (richFeed) {
+        const id = `feed:${richFeed.id}`;
+        let w = openFeedWorkspace(richFeed);
+        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
+        ws[id] = w;
+        active = id;
       }
       return { ...s, lists, next: a.next, ws, active, fresh: null };
     }

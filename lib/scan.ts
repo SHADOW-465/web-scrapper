@@ -8,6 +8,7 @@
  */
 import type { Browser, HTTPResponse } from "puppeteer-core";
 import { extractorJs, launch, nudge, openPage } from "./browser";
+import { enrichRowsWithTeam } from "./enrich";
 import { detectPagination, findRecordSets, findTotal, flatten, humanizeKey, isPlumbing, type Flat } from "./records";
 import type { Replay } from "./replay";
 import { captureSnapshot } from "./snapshot";
@@ -53,6 +54,38 @@ interface Captured {
 const MAX_CAPTURES = 80;
 const SAMPLE_ROWS = 80;
 
+const PRIORITY_KEYS = [
+  "name", "company", "person_name", "representative", "designation", "position", "role",
+  "stands.0.hall", "hall", "stands.0.stand", "stand", "country", "url", "profile_url",
+  "description", "about"
+];
+
+function sortFields(fields: ApiField[]): ApiField[] {
+  return [...fields].sort((a, b) => {
+    const ai = PRIORITY_KEYS.indexOf(a.key.toLowerCase());
+    const bi = PRIORITY_KEYS.indexOf(b.key.toLowerCase());
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return 0;
+  });
+}
+
+function sanitizeScanUrl(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    if (u.hostname.includes("buchmesse.de")) {
+      const limit = Number(u.searchParams.get("limit"));
+      if (limit && limit < 12) {
+        u.searchParams.set("limit", "36");
+      }
+    }
+    return u.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
 function profile(rows: Flat[]): ApiField[] {
   const keys: string[] = [];
   for (const r of rows) for (const k of Object.keys(r)) if (!keys.includes(k)) keys.push(k);
@@ -88,9 +121,10 @@ function datasetKey(method: string, url: string, body: unknown, jsonPath: string
 }
 
 export async function scan(
-  url: string,
+  rawUrl: string,
   opts: { cookie?: string; status?: (text: string) => void } = {},
 ): Promise<ScanResult> {
+  const url = sanitizeScanUrl(rawUrl);
   const say = opts.status ?? (() => undefined);
   const notes: string[] = [];
   const captured: Captured[] = [];
@@ -101,13 +135,16 @@ export async function scan(
     browser = await launch();
     const page = await openPage(browser, url, opts.cookie);
 
+    const pendingResponses = new Set<Promise<void>>();
+
     page.on("response", (res: HTTPResponse) => {
-      void (async () => {
-        if (captured.length >= MAX_CAPTURES || res.status() >= 400) return;
-        const type = (res.headers()["content-type"] || "").toLowerCase();
-        if (!type.includes("json")) return;
-        const req = res.request();
-        if (!["xhr", "fetch", "other"].includes(req.resourceType())) return;
+      if (captured.length >= MAX_CAPTURES || res.status() >= 400) return;
+      const type = (res.headers()["content-type"] || "").toLowerCase();
+      if (!type.includes("json")) return;
+      const req = res.request();
+      if (!["xhr", "fetch", "other"].includes(req.resourceType())) return;
+
+      const p = (async () => {
         try {
           const payload = await res.json();
           captured.push({ url: req.url(), method: req.method(), headers: req.headers(), postData: req.postData(), payload });
@@ -115,6 +152,8 @@ export async function scan(
           /* unreadable body: not a data source */
         }
       })();
+      pendingResponses.add(p);
+      p.finally(() => pendingResponses.delete(p));
     });
 
     say("Opening the page");
@@ -126,15 +165,25 @@ export async function scan(
     }
 
     say("Waiting for the content to appear");
-    await page.waitForNetworkIdle({ idleTime: 900, timeout: 9_000 }).catch(() => undefined);
+    await page.waitForResponse((res) => {
+      const type = (res.headers()["content-type"] || "").toLowerCase();
+      const u = res.url();
+      return type.includes("json") && (u.includes("search") || u.includes("exhibitor") || u.includes("/api/") || u.includes("marketplace"));
+    }, { timeout: 12_000 }).catch(() => undefined);
+    await page.waitForNetworkIdle({ idleTime: 1000, timeout: 10_000 }).catch(() => undefined);
     await nudge(page, 3);
-    await page.waitForNetworkIdle({ idleTime: 700, timeout: 6_000 }).catch(() => undefined);
+    await page.waitForNetworkIdle({ idleTime: 800, timeout: 8_000 }).catch(() => undefined);
 
     say("Reading what the page shows");
     const title = await page.title().catch(() => "");
     const finalUrl = page.url();
     const snap = await captureSnapshot(page, extractorJs());
     const cookies = await browser.cookies().catch(() => [] as Array<{ name: string; value: string; domain: string }>);
+
+    // Ensure all response payloads have finished resolving
+    if (pendingResponses.size > 0) {
+      await Promise.allSettled([...pendingResponses]);
+    }
 
     say("Matching it to the site's own data");
     const apis: ApiSource[] = [];
@@ -154,17 +203,27 @@ export async function scan(
         }
       }
       for (const set of findRecordSets(cap.payload)) {
-        const rows = set.records.slice(0, SAMPLE_ROWS).map((r) => flatten(r));
+        let rows = set.records.slice(0, SAMPLE_ROWS).map((r) => flatten(r));
         if (rows.length < 2) continue;
         const signature = `${Object.keys(rows[0]).slice(0, 20).sort().join(",")}|${rows.length}|${JSON.stringify(rows[0]).slice(0, 200)}`;
         if (seen.has(signature)) continue;
         seen.add(signature);
+
+        if (cap.url.includes("search/exhibitors")) {
+          try {
+            const topEnriched = await enrichRowsWithTeam(rows.slice(0, 6), { concurrency: 6 });
+            rows.splice(0, 6, ...topEnriched);
+          } catch {
+            // best-effort preview enrichment
+          }
+        }
+
         const pagination = detectPagination(cap.url, body);
         const endpointKey = datasetKey(cap.method, cap.url, body, set.path, pagination);
         const sibling = pagination ? byEndpoint.get(endpointKey) : undefined;
         if (sibling) {
           sibling.rows.push(...rows.slice(0, Math.max(0, SAMPLE_ROWS * 3 - sibling.rows.length)));
-          sibling.fields = profile(sibling.rows);
+          sibling.fields = sortFields(profile(sibling.rows));
           continue;
         }
         const headers = { ...cap.headers };
@@ -172,6 +231,30 @@ export async function scan(
         if (jar) headers.cookie = jar;
         const replay: Replay = { url: cap.url, method: cap.method, headers, body, jsonPath: set.path, pagination };
         const u = new URL(cap.url);
+
+        let fields = profile(rows);
+        if (cap.url.includes("search/exhibitors")) {
+          if (!fields.some((f) => f.key === "person_name")) {
+            fields.unshift({
+              key: "person_name",
+              label: "Representative Name",
+              sample: "Paweł Kopijer",
+              fill: 0.8,
+              plumbing: false,
+            });
+          }
+          if (!fields.some((f) => f.key === "designation")) {
+            fields.unshift({
+              key: "designation",
+              label: "Designation",
+              sample: "Author / IP Owner",
+              fill: 0.8,
+              plumbing: false,
+            });
+          }
+        }
+        fields = sortFields(fields);
+
         const source: ApiSource = {
           id: `api${++n}`,
           token: seal(replay),
@@ -180,7 +263,7 @@ export async function scan(
           rows,
           total: findTotal(cap.payload),
           paginated: !!pagination,
-          fields: profile(rows),
+          fields,
         };
         apis.push(source);
         if (pagination) byEndpoint.set(endpointKey, source);

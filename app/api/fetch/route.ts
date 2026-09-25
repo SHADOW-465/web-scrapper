@@ -13,7 +13,12 @@ export const maxDuration = 300;
  */
 export async function POST(req: Request) {
   if (!hasAccess(req)) return denied();
-  const body = (await req.json().catch(() => ({}))) as { token?: string; startIndex?: number; maxRows?: number };
+  const body = (await req.json().catch(() => ({}))) as {
+    token?: string;
+    startIndex?: number;
+    maxRows?: number;
+    enrichTeam?: boolean;
+  };
   let replay: Replay;
   try {
     replay = open<Replay>(String(body.token ?? ""));
@@ -22,11 +27,12 @@ export async function POST(req: Request) {
   }
   const startIndex = Math.max(0, Math.floor(Number(body.startIndex) || 0));
   const maxRows = body.maxRows && body.maxRows > 0 ? Math.floor(body.maxRows) : undefined;
+  const enrichTeam = !!body.enrichTeam;
 
   return ndjson(async (emit) => {
     const deadline = Date.now() + (maxDuration - 45) * 1000;
     let last = { done: false, nextIndex: startIndex };
-    for await (const page of replayPages(replay, { startIndex, maxRows, deadline })) {
+    for await (const page of replayPages(replay, { startIndex, maxRows, deadline, enrichTeam })) {
       emit({ type: "rows", rows: page.rows, total: page.total });
       last = page;
     }

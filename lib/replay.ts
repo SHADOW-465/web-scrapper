@@ -5,6 +5,7 @@
  * headers, cookies). Re-sending it with the page number bumped gets every
  * remaining page without paying for a browser per page.
  */
+import { enrichRowsWithTeam } from "./enrich";
 import { dig, findTotal, flatten, type Flat, type Pagination } from "./records";
 import { resolvesPublic } from "./ssrf";
 
@@ -60,7 +61,7 @@ export interface PageResult {
  */
 export async function* replayPages(
   r: Replay,
-  opts: { startIndex?: number; maxRows?: number; deadline: number; delayMs?: number },
+  opts: { startIndex?: number; maxRows?: number; deadline: number; delayMs?: number; enrichTeam?: boolean },
 ): AsyncGenerator<PageResult> {
   const headers = cleanHeaders(r.headers);
   const method = (r.method || "GET").toUpperCase();
@@ -87,7 +88,16 @@ export async function* replayPages(
     const payload = await res.json();
     total ??= findTotal(payload);
     const records = dig(payload, r.jsonPath);
-    const rows = Array.isArray(records) ? records.filter((x) => x && typeof x === "object").map((x) => flatten(x)) : [];
+    let rows = Array.isArray(records) ? records.filter((x) => x && typeof x === "object").map((x) => flatten(x)) : [];
+
+    if (opts.enrichTeam && (r.url.includes("search/exhibitors") || rows.some((row) => row["url"] || row["slug"]))) {
+      try {
+        rows = await enrichRowsWithTeam(rows, { concurrency: 10 });
+      } catch {
+        // preserve base rows on network error
+      }
+    }
+
     index += 1;
     fetched += rows.length;
 

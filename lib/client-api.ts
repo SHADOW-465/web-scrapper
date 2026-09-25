@@ -35,11 +35,11 @@ export async function scanPage(url: string, cookie: string | undefined, onStatus
 /** Pull every page of a feed, chaining calls past the per-request time limit. */
 export async function fetchAll(
   token: string,
-  opts: { maxRows?: number; onRows: (rows: Row[], total: number | null) => void; signal?: AbortSignal },
+  opts: { maxRows?: number; enrichTeam?: boolean; onRows: (rows: Row[], total: number | null) => void; signal?: AbortSignal },
 ): Promise<void> {
   let startIndex = 0;
   for (let hop = 0; hop < 40; hop++) {
-    const res = await post("/api/fetch", { token, startIndex, maxRows: opts.maxRows }, opts.signal);
+    const res = await post("/api/fetch", { token, startIndex, maxRows: opts.maxRows, enrichTeam: opts.enrichTeam }, opts.signal);
     let next: number | null = null;
     let error: string | null = null;
     await readNdjson(res, (e) => {

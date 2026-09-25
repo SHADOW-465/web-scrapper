@@ -29,9 +29,22 @@ interface Job {
 const idleJob: Job = { state: "idle", rows: [], total: null };
 
 function normalizeUrl(v: string): string {
-  const t = v.trim();
+  let t = v.trim();
   if (!t) return "";
-  return /^https?:\/\//i.test(t) ? t : `https://${t}`;
+  t = /^https?:\/\//i.test(t) ? t : `https://${t}`;
+  try {
+    const u = new URL(t);
+    if (u.hostname.includes("buchmesse.de")) {
+      const limit = Number(u.searchParams.get("limit"));
+      if (limit && limit < 12) {
+        u.searchParams.set("limit", "36");
+        return u.toString();
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return t;
 }
 
 function hostOf(u: string): string {
@@ -260,12 +273,26 @@ export default function Studio() {
     try {
       let pages = 0;
       if (scope === "feed" && feed) {
+        const needsEnrichTeam = onCols.some((c) =>
+          c.feedKey === "person_name" ||
+          c.feedKey === "designation" ||
+          c.name.toLowerCase().includes("representative") ||
+          c.name.toLowerCase().includes("designation")
+        );
         await fetchAll(feed.token, {
           signal: ac.signal,
+          enrichTeam: needsEnrichTeam,
           onRows: (r, total) => {
             collected.push(...r);
             pages++;
-            setJob({ state: "running", key: jobKey, rows: [...collected], total: total ?? feed.total, pages, status: `Page ${pages}` });
+            setJob({
+              state: "running",
+              key: jobKey,
+              rows: [...collected],
+              total: total ?? feed.total,
+              pages,
+              status: needsEnrichTeam ? `Page ${pages} (enriching representatives)` : `Page ${pages}`,
+            });
           },
         });
         const out = feedRows(ws, activeList, collected);

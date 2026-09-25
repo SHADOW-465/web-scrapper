@@ -29,6 +29,12 @@ export function ListsFound(props: {
       </p>
     );
   }
+
+  const primaryFeeds = otherFeeds.filter(
+    (f) => (f.total && f.total > 15) || active === `feed:${f.id}` || f.endpoint.includes("search/exhibitors")
+  );
+  const remainingFeeds = otherFeeds.filter((f) => !primaryFeeds.includes(f));
+
   // Two lists often share the nearest heading; tell them apart by what they hold.
   const names = new Map<string, number>();
   lists.forEach((l) => names.set(l.name, (names.get(l.name) ?? 0) + 1));
@@ -36,32 +42,81 @@ export function ListsFound(props: {
     if ((names.get(l.name) ?? 0) < 2) return l.name;
     return `${l.name} · ${fmt(l.count)} items`;
   };
+
   return (
     <>
-      <div className="lists" role="list">
-        {lists.map((l) => {
-          const t = totals[l.id];
-          return (
-            <button key={l.id} role="listitem" className="listrow" aria-pressed={active === l.id} onClick={() => onPick(l.id)}>
+      {primaryFeeds.length > 0 && (
+        <div className="lists" role="list" style={{ marginBottom: 12 }}>
+          {primaryFeeds.map((f) => (
+            <button
+              key={f.id}
+              role="listitem"
+              className="listrow"
+              aria-pressed={active === `feed:${f.id}`}
+              onClick={() => onPick(`feed:${f.id}`)}
+            >
               <span style={{ minWidth: 0 }}>
-                <span className="lname"><span>{label(l)}</span></span>
+                <span className="lname">
+                  <span>{feedTitle(f)}</span>
+                </span>
                 <span className="lmeta">
-                  {l.columns.slice(0, 3).map((c) => c.values.find(Boolean)).filter(Boolean).join(" · ") || `${l.columns.length} fields`}
+                  {f.fields.filter((x) => !x.plumbing).slice(0, 4).map((x) => x.label).join(" · ")}
                 </span>
               </span>
               <span style={{ display: "grid", justifyItems: "end", gap: 3 }}>
-                <span className="count"><span className="num">{fmt(l.count)}</span> on page</span>
-                {t ? <span className="badge badge-feed"><Database size={11} aria-hidden="true" />{t === "many" ? "every page" : <><span className="num">{fmt(t)}</span> total</>}</span> : null}
+                <span className="count">
+                  {f.total ? (
+                    <>
+                      <span className="num">{fmt(f.total)}</span> total
+                    </>
+                  ) : f.paginated ? (
+                    "every page"
+                  ) : (
+                    <>
+                      <span className="num">{fmt(f.rows.length)}</span> rows
+                    </>
+                  )}
+                </span>
+                <span className="badge badge-feed">
+                  <Database size={11} aria-hidden="true" />
+                  Directory
+                </span>
               </span>
             </button>
-          );
-        })}
-      </div>
-      {otherFeeds.length > 0 && (
+          ))}
+        </div>
+      )}
+
+      {lists.length > 0 && (
+        <>
+          {primaryFeeds.length > 0 && <div className="subhead">On-screen page lists</div>}
+          <div className="lists" role="list">
+            {lists.map((l) => {
+              const t = totals[l.id];
+              return (
+                <button key={l.id} role="listitem" className="listrow" aria-pressed={active === l.id} onClick={() => onPick(l.id)}>
+                  <span style={{ minWidth: 0 }}>
+                    <span className="lname"><span>{label(l)}</span></span>
+                    <span className="lmeta">
+                      {l.columns.slice(0, 3).map((c) => c.values.find(Boolean)).filter(Boolean).join(" · ") || `${l.columns.length} fields`}
+                    </span>
+                  </span>
+                  <span style={{ display: "grid", justifyItems: "end", gap: 3 }}>
+                    <span className="count"><span className="num">{fmt(l.count)}</span> on page</span>
+                    {t ? <span className="badge badge-feed"><Database size={11} aria-hidden="true" />{t === "many" ? "every page" : <><span className="num">{fmt(t)}</span> total</>}</span> : null}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {remainingFeeds.length > 0 && (
         <>
           <div className="subhead">Other data behind this page</div>
           <div className="lists" role="list">
-            {otherFeeds.map((f) => (
+            {remainingFeeds.map((f) => (
               <button key={f.id} role="listitem" className="listrow" aria-pressed={active === `feed:${f.id}`} onClick={() => onPick(`feed:${f.id}`)}>
                 <span style={{ minWidth: 0 }}>
                   <span className="lname"><span>{feedTitle(f)}</span></span>
