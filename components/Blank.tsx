@@ -65,20 +65,104 @@ export function Printing({ host, status }: { host: string; status: string[] }) {
   );
 }
 
-export function Failed({ message, onRetry, onBack }: { message: string; onRetry: () => void; onBack: () => void }) {
+export function Failed({
+  message,
+  initialUrl,
+  onRetry,
+  onBack,
+  onScanUrl,
+}: {
+  message: string;
+  initialUrl?: string;
+  onRetry: () => void;
+  onBack: () => void;
+  onScanUrl?: (url: string) => void;
+}) {
+  const isBuchmesse = initialUrl?.includes("buchmesse.de");
+  const suggestedApi = isBuchmesse
+    ? "https://event.buchmesse.de/api/v1/search/exhibitors"
+    : initialUrl?.includes("/api/")
+    ? initialUrl
+    : "";
+  const [customUrl, setCustomUrl] = useState(suggestedApi || initialUrl || "");
+
+  const isServerlessTimeout =
+    message.includes("500") ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("memory") ||
+    message.includes("browser");
+
   return (
     <div className="blank">
       <article className="page-paper">
         <div className="errbox" role="alert">
-          <b>That page couldn&rsquo;t be read.</b>
-          {message}
+          <b style={{ display: "block", marginBottom: 4 }}>That page couldn&rsquo;t be read.</b>
+          <span>{message}</span>
         </div>
-        <p style={{ marginTop: 16 }}>
-          Some sites block automated browsers or need you to sign in first. If you can see the page in your own browser, try again, or use <b>Signed-in page</b> with your cookie.
-        </p>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-primary" onClick={onRetry}>Try again</button>
-          <button className="btn btn-quiet" onClick={onBack}>Start over</button>
+
+        {isServerlessTimeout && (
+          <div
+            style={{
+              marginTop: 14,
+              padding: "12px 14px",
+              background: "var(--paper-subtle, #f8fafc)",
+              border: "1px solid var(--border, #e2e8f0)",
+              borderRadius: 6,
+              fontSize: 13,
+            }}
+          >
+            <p style={{ margin: "0 0 6px 0", fontWeight: 600, color: "var(--fg, #1e293b)" }}>
+              Why did this happen?
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 18, color: "var(--muted, #475569)", lineHeight: 1.5 }}>
+              <li>
+                <strong>Vercel Timeout (10s):</strong> Heavy SPA sites take 15–20s for headless Chrome to render, exceeding serverless limits.
+              </li>
+              <li>
+                <strong>Fast-Path Direct API:</strong> You can scrape directories directly using their JSON catalog endpoint with zero browser overhead.
+              </li>
+              <li>
+                <strong>Local Port Conflict:</strong> If running locally, another app may be occupying port 3000 (try <code>http://localhost:3001</code>).
+              </li>
+            </ul>
+          </div>
+        )}
+
+        {onScanUrl && (
+          <div style={{ marginTop: 16 }}>
+            <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--fg, #334155)", marginBottom: 6 }}>
+              Bypass browser with direct catalog API endpoint:
+            </label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                type="text"
+                className="input"
+                style={{ flex: 1, padding: "7px 10px", fontSize: 13 }}
+                value={customUrl}
+                onChange={(e) => setCustomUrl(e.target.value)}
+                placeholder="https://event.buchmesse.de/api/v1/search/exhibitors"
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  if (customUrl.trim()) onScanUrl(customUrl.trim());
+                }}
+              >
+                Scan Direct API
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+          <button className="btn btn-primary" onClick={onRetry}>
+            Try again
+          </button>
+          <button className="btn btn-quiet" onClick={onBack}>
+            Start over
+          </button>
         </div>
       </article>
     </div>

@@ -423,9 +423,18 @@ export default function Studio() {
       </header>
 
       {phase === "idle" && <Welcome onTry={(u) => { pending.current = null; void startScan(u); }} />}
-      {phase === "scanning" && <Printing host={hostOf(url)} status={status} />}
-      {phase === "error" && <Failed message={error} onRetry={() => void startScan(url)} onBack={() => setPhase("idle")} />}
-      {phase === "locked" && <Locked onUnlock={async (pw) => { const ok = await unlock(pw); if (ok) { setPhase("idle"); if (url) void startScan(url); } return ok; }} />}
+      {phase === "error" && (
+        <Failed
+          message={error}
+          initialUrl={url}
+          onRetry={() => void startScan(url)}
+          onBack={() => setPhase("idle")}
+          onScanUrl={(newUrl) => {
+            setUrl(newUrl);
+            void startScan(newUrl);
+          }}
+        />
+      )}
 
       {phase === "ready" && scan && (
         <div className="work">

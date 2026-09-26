@@ -5,11 +5,46 @@ import type { Feed, Row } from "./model";
 export class LockedError extends Error {}
 
 async function post(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
-  const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("connection refused")) {
+      throw new Error(
+        "Could not connect to Scrape Studio backend. If running locally, check if Scrape Studio is on another port (e.g. http://localhost:3001)."
+      );
+    }
+    throw err;
+  }
+
   if (res.status === 401) throw new LockedError("locked");
   if (!res.ok) {
-    const data = (await res.json().catch(() => ({}))) as { message?: string };
-    throw new Error(data.message || `The server answered ${res.status}.`);
+    const text = await res.text().catch(() => "");
+    let message = "";
+    try {
+      const data = JSON.parse(text);
+      message = data.message || data.error;
+    } catch {
+      if (text.includes("FUNCTION_INVOCATION_TIMEOUT") || res.status === 504) {
+        message = "Scan timed out on serverless function (Vercel limit exceeded). Use direct catalog API mode to scrape without a browser.";
+      } else if (text.includes("FUNCTION_INVOCATION_FAILED") || text.includes("Crash") || text.includes("137")) {
+        message = "Serverless browser ran out of memory on Vercel. Try using the site's direct catalog API endpoint.";
+      } else if (res.status === 500) {
+        const match = text.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i) || text.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+        if (match) {
+          message = `Server error 500: ${match[1].replace(/<[^>]+>/g, "").trim().slice(0, 160)}`;
+        } else {
+          message = `The server answered 500. ${text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 140)}`;
+        }
+      }
+    }
+    throw new Error(message || `The server answered ${res.status}.`);
   }
   return res;
 }
