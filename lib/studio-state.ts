@@ -4,8 +4,8 @@
  * they always act on current state, never on a stale closure.
  */
 import {
-  addFeedColumn, addPageColumn, matchList, openFeedWorkspace, openWorkspace,
-  type Feed, type FeedField, type PageColumn, type PageList, type Workspace,
+  addFeedColumn, addPageColumn, matchList, nextInk, openFeedWorkspace, openWorkspace, uniqueNames,
+  type Column, type Feed, type FeedField, type ItemsInfo, type PageColumn, type PageList, type Workspace,
 } from "./model";
 import type { RecipeColumn } from "./recipes";
 
@@ -18,13 +18,15 @@ export interface State {
   ws: Record<string, Workspace>;
   active: string | null;
   fresh: string | null; // page key of the column just inked, for the swipe
+  preferItems: Array<{ key: string; name: string }> | null; // from a recipe, applied when item fields arrive
 }
 
-export const initial: State = { feeds: [], lists: [], next: null, ws: {}, active: null, fresh: null };
+export const initial: State = { feeds: [], lists: [], next: null, ws: {}, active: null, fresh: null, preferItems: null };
 
 export type Action =
   | { type: "scanned"; feeds: Feed[] }
-  | { type: "ready"; lists: PageList[]; next: NextControl | null; prefer?: { itemSelector?: string; columns?: RecipeColumn[]; feedEndpoint?: string } }
+  | { type: "ready"; lists: PageList[]; next: NextControl | null; prefer?: { itemSelector?: string; columns?: RecipeColumn[]; feedEndpoint?: string; itemColumns?: Array<{ key: string; name: string }> } }
+  | { type: "items"; wsId: string; items: ItemsInfo; reset?: boolean }
   | { type: "pick"; listId: string; created?: PageList | null; column?: PageColumn; remove?: string }
   | { type: "activate"; id: string }
   | { type: "toggle"; id: string }
@@ -75,41 +77,54 @@ export function reducer(s: State, a: Action): State {
       const ws: Record<string, Workspace> = {};
       const pinned = a.prefer?.itemSelector ? lists.find((l) => l.itemSelector === a.prefer!.itemSelector) : undefined;
 
-      const richFeed = s.feeds.find((f) => a.prefer?.feedEndpoint ? f.endpoint === a.prefer.feedEndpoint : ((f.total && f.total > 15) || f.rows.length >= 10)) ?? bestFeed(s.feeds);
+      // A saved recipe names its feed; otherwise the biggest dataset (by what the site says it holds) leads.
+      const richFeed = (a.prefer?.feedEndpoint ? s.feeds.find((f) => f.endpoint === a.prefer!.feedEndpoint) : undefined) ?? bestFeed(s.feeds);
       const listMatchingRichFeed = richFeed ? lists.find((l) => {
         const m = matchList(l, [richFeed]);
         return m && m.pairs.length > 0;
       }) : undefined;
 
-      if (pinned) {
-        let w = openWorkspace(pinned, s.feeds);
-        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
-        ws[pinned.id] = w;
-        active = pinned.id;
-      } else if (listMatchingRichFeed) {
-        let w = openWorkspace(listMatchingRichFeed, s.feeds);
-        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
-        ws[listMatchingRichFeed.id] = w;
-        active = listMatchingRichFeed.id;
-      } else if (richFeed && (!lists[0] || lists[0].count <= 6)) {
-        const id = `feed:${richFeed.id}`;
-        let w = openFeedWorkspace(richFeed);
-        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
-        ws[id] = w;
+      // Open whatever reaches the most rows. A list on the page reaches as far
+      // as the feed it matches; a feed on its own reaches its reported total.
+      const size = (f: Feed) => f.total ?? f.rows.length;
+      const reach = (l: PageList) => {
+        const m = matchList(l, s.feeds);
+        const f = m ? s.feeds.find((x) => x.id === m.apiId) : undefined;
+        return f ? Math.max(size(f), l.count) : l.count;
+      };
+      const bestList = [...lists].filter((l) => !l.manual).sort((x, y) => reach(y) - reach(x))[0];
+      const open = (id: string, w: Workspace) => {
+        ws[id] = a.prefer?.columns?.length ? applyRecipe(w, a.prefer.columns) : w;
         active = id;
-      } else if (lists[0]) {
-        let w = openWorkspace(lists[0], s.feeds);
-        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
-        ws[lists[0].id] = w;
-        active = lists[0].id;
-      } else if (richFeed) {
-        const id = `feed:${richFeed.id}`;
-        let w = openFeedWorkspace(richFeed);
-        if (a.prefer?.columns?.length) w = applyRecipe(w, a.prefer.columns);
-        ws[id] = w;
-        active = id;
+      };
+
+      if (pinned) open(pinned.id, openWorkspace(pinned, s.feeds));
+      else if (listMatchingRichFeed) open(listMatchingRichFeed.id, openWorkspace(listMatchingRichFeed, s.feeds));
+      // The page shows a slice of something much bigger that no on-screen list matched: open the data.
+      else if (richFeed && (!bestList || size(richFeed) >= 3 * reach(bestList))) open(`feed:${richFeed.id}`, openFeedWorkspace(richFeed));
+      else if (bestList) open(bestList.id, openWorkspace(bestList, s.feeds));
+      else if (richFeed) open(`feed:${richFeed.id}`, openFeedWorkspace(richFeed));
+      return { ...s, lists, next: a.next, ws, active, fresh: null, preferItems: a.prefer?.itemColumns ?? null };
+    }
+    case "items": {
+      const w0 = s.ws[a.wsId];
+      if (!w0) return s;
+      const w = a.reset ? { ...w0, columns: w0.columns.filter((c) => !c.item) } : w0;
+      let columns = w.columns;
+      const cat = a.items.catalogue;
+      if (cat && !w.columns.some((c) => c.item)) {
+        const prefer = new Map((s.preferItems ?? []).map((p) => [p.key, p.name]));
+        const added: Column[] = [];
+        for (const f of cat.fields) {
+          added.push({
+            id: `i-${f.key}`, name: prefer.get(f.key) ?? f.name, ink: nextInk([...columns, ...added]), on: prefer.has(f.key),
+            item: { key: f.key, sel: f.sel, attr: f.attr, multi: f.multi, listId: f.listId }, sample: f.sample,
+          });
+        }
+        columns = [...columns, ...added];
+        uniqueNames(columns);
       }
-      return { ...s, lists, next: a.next, ws, active, fresh: null };
+      return { ...s, ws: { ...s.ws, [a.wsId]: { ...w, items: a.items, columns } } };
     }
     case "activate": {
       const w = workspaceFor(s, a.id);

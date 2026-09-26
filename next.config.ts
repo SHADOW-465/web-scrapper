@@ -3,10 +3,12 @@ import type { NextConfig } from "next";
 const config: NextConfig = {
   // Chromium ships as a compressed binary inside @sparticuz/chromium; it must be
   // left out of bundling and its bin/ folder traced into the functions that launch it.
-  serverExternalPackages: ["@sparticuz/chromium", "puppeteer-core"],
+  serverExternalPackages: ["@sparticuz/chromium", "puppeteer-core", "linkedom"],
   outputFileTracingIncludes: {
     "/api/scan": ["./node_modules/@sparticuz/chromium/bin/**", "./lib/extractor.js"],
     "/api/crawl": ["./node_modules/@sparticuz/chromium/bin/**", "./lib/extractor.js"],
+    "/api/items/sample": ["./node_modules/@sparticuz/chromium/bin/**", "./lib/extractor.js"],
+    "/api/items/read": ["./node_modules/@sparticuz/chromium/bin/**", "./lib/extractor.js"],
   },
   outputFileTracingExcludes: {
     "*": ["./legacy/**", "./data/**", "./exports/**", "./docs/**"],

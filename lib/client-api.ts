@@ -1,50 +1,35 @@
-/** Browser-side calls to the three streaming endpoints. */
+/** Browser-side calls to the streaming endpoints. */
 import { readNdjson } from "./ndjson";
-import type { Feed, Row } from "./model";
+import type { ItemResult, ItemSpec } from "./items-client";
+import type { Feed, ItemCatalogue, ItemSource, Row } from "./model";
 
 export class LockedError extends Error {}
+export class HttpError extends Error {
+  constructor(message: string, public status: number) {
+    super(message);
+  }
+}
 
 async function post(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
   let res: Response;
   try {
-    res = await fetch(path, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("connection refused")) {
-      throw new Error(
-        "Could not connect to Scrape Studio backend. If running locally, check if Scrape Studio is on another port (e.g. http://localhost:3001)."
-      );
-    }
-    throw err;
+    res = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal });
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    throw new Error("Couldn't reach the Scrape Studio server. Check your connection.");
   }
-
   if (res.status === 401) throw new LockedError("locked");
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     let message = "";
     try {
-      const data = JSON.parse(text);
-      message = data.message || data.error;
+      const data = JSON.parse(text) as { message?: string; error?: string };
+      message = data.message || data.error || "";
     } catch {
-      if (text.includes("FUNCTION_INVOCATION_TIMEOUT") || res.status === 504) {
-        message = "Scan timed out on serverless function (Vercel limit exceeded). Use direct catalog API mode to scrape without a browser.";
-      } else if (text.includes("FUNCTION_INVOCATION_FAILED") || text.includes("Crash") || text.includes("137")) {
-        message = "Serverless browser ran out of memory on Vercel. Try using the site's direct catalog API endpoint.";
-      } else if (res.status === 500) {
-        const match = text.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i) || text.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-        if (match) {
-          message = `Server error 500: ${match[1].replace(/<[^>]+>/g, "").trim().slice(0, 160)}`;
-        } else {
-          message = `The server answered 500. ${text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 140)}`;
-        }
-      }
+      if (res.status === 504 || text.includes("FUNCTION_INVOCATION_TIMEOUT")) message = "The server took too long to answer.";
+      else if (text.includes("FUNCTION_INVOCATION_FAILED")) message = "The server crashed while working on that. See the deployment's function logs.";
     }
-    throw new Error(message || `The server answered ${res.status}.`);
+    throw new HttpError(message || `The server answered ${res.status}.`, res.status);
   }
   return res;
 }
@@ -67,25 +52,41 @@ export async function scanPage(url: string, cookie: string | undefined, onStatus
   return result;
 }
 
-/** Pull every page of a feed, chaining calls past the per-request time limit. */
-export async function fetchAll(
-  token: string,
-  opts: { maxRows?: number; enrichTeam?: boolean; onRows: (rows: Row[], total: number | null) => void; signal?: AbortSignal },
-): Promise<void> {
-  let startIndex = 0;
-  for (let hop = 0; hop < 40; hop++) {
-    const res = await post("/api/fetch", { token, startIndex, maxRows: opts.maxRows, enrichTeam: opts.enrichTeam }, opts.signal);
-    let next: number | null = null;
-    let error: string | null = null;
-    await readNdjson(res, (e) => {
-      if (e.type === "rows") opts.onRows(e.rows as Row[], (e.total as number | null) ?? null);
-      else if (e.type === "continue") next = e.nextIndex as number;
-      else if (e.type === "error") error = String(e.message);
-    });
-    if (error) throw new Error(error);
-    if (next == null) return;
-    startIndex = next;
-  }
+export interface Chunk {
+  rows: Row[];
+  total: number | null;
+  pages: number;
+  next: number | null;  // null when every page has been fetched
+  failedAt?: number;    // a page failed after the server's own retries
+  error?: string;
+}
+
+/** One short slice of a feed (about 25 seconds of pages). */
+export async function fetchChunk(token: string, startIndex: number, signal?: AbortSignal, maxRows?: number): Promise<Chunk> {
+  const res = await post("/api/fetch", { token, startIndex, maxRows }, signal);
+  const chunk: Chunk = { rows: [], total: null, pages: 0, next: startIndex };
+  let finished = false;
+  await readNdjson(res, (e) => {
+    if (e.type === "rows") {
+      chunk.rows.push(...(e.rows as Row[]));
+      chunk.total = (e.total as number | null) ?? chunk.total;
+      chunk.pages++;
+      chunk.next = e.nextIndex as number;
+    } else if (e.type === "continue") {
+      chunk.next = e.nextIndex as number;
+      finished = true;
+    } else if (e.type === "done") {
+      chunk.next = null;
+      finished = true;
+    } else if (e.type === "error") {
+      chunk.failedAt = e.nextIndex as number;
+      chunk.error = String(e.message);
+      finished = true;
+    }
+  });
+  // A stream cut off mid-way (dropped connection, function killed) is a failed step.
+  if (!finished) throw new Error("The connection dropped");
+  return chunk;
 }
 
 export interface CrawlRequest {
@@ -109,6 +110,50 @@ export async function crawlPages(
   });
   if (error) throw new Error(error);
   return summary;
+}
+
+/** Find and sample an item page: what can be read from each row's own page. */
+export async function sampleItems(
+  body: { scanUrl: string; cookie?: string; urls?: string[]; discover?: { hintPaths: string[]; candidates: Array<{ key: string; values: string[] }>; verify: string[] } },
+  onStatus: (s: string) => void,
+  signal?: AbortSignal,
+): Promise<{ pattern: ItemSource | null; catalogue: ItemCatalogue } | null> {
+  const res = await post("/api/items/sample", body, signal);
+  let out: { pattern: ItemSource | null; catalogue: ItemCatalogue } | null = null;
+  let error: string | null = null;
+  await readNdjson(res, (e) => {
+    if (e.type === "status") onStatus(String(e.text));
+    else if (e.type === "result") out = { pattern: (e.pattern as ItemSource | null) ?? null, catalogue: e.catalogue as ItemCatalogue };
+    else if (e.type === "error") error = String(e.message);
+  });
+  if (error) throw new Error(error);
+  return out;
+}
+
+/** Read a batch of item pages. Addresses not reached in time come back as `pending`. */
+export async function readItemBatch(
+  body: { scanUrl: string; cookie?: string; urls: string[]; spec: ItemSpec },
+  signal?: AbortSignal,
+): Promise<{ results: ItemResult[]; pending: string[] }> {
+  const res = await post("/api/items/read", body, signal);
+  const results: ItemResult[] = [];
+  let pending: string[] | null = null;
+  let error: string | null = null;
+  await readNdjson(res, (e) => {
+    if (e.type === "item") {
+      const { type: _t, ...r } = e;
+      results.push(r as unknown as ItemResult);
+    } else if (e.type === "done") pending = (e.pending as string[]) ?? [];
+    else if (e.type === "error") error = String(e.message);
+  });
+  if (error) throw new Error(error);
+  if (pending === null) {
+    // Cut off mid-way: keep what arrived, send the rest round again.
+    const got = new Set(results.map((r) => r.url));
+    pending = body.urls.filter((u) => !got.has(u));
+    if (!results.length) throw new Error("The connection dropped");
+  }
+  return { results, pending };
 }
 
 export async function unlock(password: string): Promise<boolean> {

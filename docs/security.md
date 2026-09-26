@@ -17,8 +17,10 @@ target site's code in its own origin, and it can leak what the user gave it.
 - Inside Chromium, request interception applies the same check to every
   subresource the page asks for, so a public page can't make the server's
   browser fetch an internal address.
-- Replaying a feed checks the host before each request and does not follow
-  redirects, so a public endpoint can't bounce the fetcher inward.
+- Every server-side request (feed replay, item pages, pasted data addresses)
+  goes through `lib/safe-fetch.ts`, which re-checks the host on every redirect
+  hop, so a public site can't bounce the server into a private network.
+- Item page addresses come from the site's data; they get the same checks.
 
 Residual risk: DNS rebinding between the check and the connection. Lookups are
 cached per function instance, which narrows the window.
@@ -35,8 +37,8 @@ accepts `postMessage` only from that iframe's own window.
 
 ## What the user gives us
 
-- **Pasted cookies** are set only for the target host, used for that scan (and
-  a crawl started from it), and never stored, logged, or returned. They can
+- **Pasted cookies** are set only for the target host and its subdomains,
+  including when item pages are read, and never stored, logged, or returned. They can
   appear inside a feed token, which is sealed.
 - **Feed tokens** are AES-256-GCM sealed with `SCRAPE_SECRET` and expire after
   six hours. The browser can neither read them (they may hold cookies) nor

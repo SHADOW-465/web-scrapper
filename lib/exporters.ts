@@ -49,13 +49,39 @@ async function toXlsx(rows: Row[], fields: string[]): Promise<Blob> {
   return writeXlsxFile([header, ...body] as never, { columns: widths, stickyRowsCount: 1 } as never).toBlob();
 }
 
-async function toPdf(rows: Row[], fields: string[], title: string): Promise<Blob> {
+/** Loads a font file as bytes. In the browser it comes from /fonts; tests pass their own. */
+export type FontLoader = (file: string) => Promise<ArrayBuffer>;
+const browserFonts: FontLoader = async (file) => (await fetch(`/fonts/${file}`)).arrayBuffer();
+
+function base64(buf: ArrayBuffer): string {
+  if (typeof Buffer !== "undefined") return Buffer.from(buf).toString("base64");
+  let bin = "";
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+async function toPdf(rows: Row[], fields: string[], title: string, fonts: FontLoader): Promise<Blob> {
   const [{ jsPDF }, { autoTable }] = await Promise.all([import("jspdf"), import("jspdf-autotable")]);
   const doc = new jsPDF({ orientation: fields.length > 4 ? "landscape" : "portrait", unit: "pt", format: "a4" });
-  doc.setFont("helvetica", "bold");
+  // PDF's built-in fonts cover Western European text only: "Paweł", "Škoda",
+  // "Łódź" and curly quotes would come out broken. Embed DejaVu Sans, which
+  // covers Latin, Greek and Cyrillic. If it can't load, fall back to Helvetica.
+  let face = "helvetica";
+  try {
+    const [regular, bold] = await Promise.all([fonts("DejaVuSans.ttf"), fonts("DejaVuSans-Bold.ttf")]);
+    doc.addFileToVFS("DejaVuSans.ttf", base64(regular));
+    doc.addFont("DejaVuSans.ttf", "DejaVu", "normal");
+    doc.addFileToVFS("DejaVuSans-Bold.ttf", base64(bold));
+    doc.addFont("DejaVuSans-Bold.ttf", "DejaVu", "bold");
+    face = "DejaVu";
+  } catch {
+    /* keep Helvetica */
+  }
+  doc.setFont(face, "bold");
   doc.setFontSize(14);
   doc.text(title.slice(0, 90), 36, 40);
-  doc.setFont("helvetica", "normal");
+  doc.setFont(face, "normal");
   doc.setFontSize(9);
   doc.setTextColor(90);
   doc.text(`${rows.length.toLocaleString()} rows · ${new Date().toLocaleString()}`, 36, 56);
@@ -63,7 +89,7 @@ async function toPdf(rows: Row[], fields: string[], title: string): Promise<Blob
     startY: 68,
     head: [fields],
     body: rows.map((r) => fields.map((f) => cell(r[f]).slice(0, 300))),
-    styles: { fontSize: 7.5, cellPadding: 3, overflow: "linebreak", textColor: 29 },
+    styles: { font: face, fontSize: 7.5, cellPadding: 3, overflow: "linebreak", textColor: 29 },
     headStyles: { fillColor: [29, 31, 34], textColor: 255, fontStyle: "bold" },
     alternateRowStyles: { fillColor: [246, 247, 248] },
     margin: { left: 36, right: 36 },
@@ -80,12 +106,12 @@ export function fileBase(name: string): string {
   return (name || "export").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").toLowerCase().slice(0, 60) || "export";
 }
 
-export async function buildFile(fmt: Format, rows: Row[], fields: string[], title: string): Promise<{ blob: Blob; filename: string }> {
+export async function buildFile(fmt: Format, rows: Row[], fields: string[], title: string, fonts: FontLoader = browserFonts): Promise<{ blob: Blob; filename: string }> {
   const base = fileBase(title);
   if (fmt === "csv") return { blob: new Blob([toCsv(rows, fields)], { type: "text/csv;charset=utf-8" }), filename: `${base}.csv` };
   if (fmt === "json") return { blob: new Blob([toJson(rows, fields)], { type: "application/json" }), filename: `${base}.json` };
   if (fmt === "xlsx") return { blob: await toXlsx(rows, fields), filename: `${base}.xlsx` };
-  return { blob: await toPdf(rows, fields, title), filename: `${base}.pdf` };
+  return { blob: await toPdf(rows, fields, title, fonts), filename: `${base}.pdf` };
 }
 
 export function download(blob: Blob, filename: string) {

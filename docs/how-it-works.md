@@ -121,3 +121,55 @@ strict Content-Security-Policy are added. Only the engine script runs, by nonce.
 The browser shows it in an `<iframe sandbox="allow-scripts">`, whose opaque
 origin can't reach the app. The app and the snapshot talk only by
 `postMessage`, and the app accepts messages only from that iframe's window.
+
+## Item pages
+
+When rows have pages of their own (an exhibitor's profile), `lib/items.ts`:
+
+1. **Finds each row's page.** A link column on the list, a data field that is
+   already an address, a link on the page containing a row's value, or, failing
+   those, candidate patterns built from the site's own paths (`/exhibitor/{id}`)
+   tested against real rows. A pattern only counts when the page it produces
+   mentions that row, on two rows, and a made-up id does *not* pass the same
+   test (some sites answer every address with the same page).
+2. **Samples pages spread across the whole list**, including rows fetched from
+   the middle and end of long feeds, because items near the start of an
+   alphabetical list can all be sparse. Of 24 candidates it analyses the ones
+   that add kinds of content the others lack (judged by the site's own field
+   hooks), at least 4 and up to 10.
+3. **Detects fields on the plain HTML**, laid out in the browser without its
+   scripts. Selectors found this way work for the no-browser reader by
+   construction. Cards the site labels itself (`data-testid="teamMember"`)
+   form a list even when a page shows only one; a table of labels and values
+   becomes named fields; anything identical on two different items' pages is
+   site furniture and is dropped.
+4. **Reads every item page** with plain HTTP and an HTML parser, 8 at a time
+   per call, about 0.12 s per page. Only when the plain HTML lacks the fields
+   does it fall back to a browser per page.
+
+People lists expand into one row per person with the row's other columns
+repeated. Other lists join into one cell.
+
+## Export jobs
+
+`lib/job.ts` runs in the browser. Rows come from `/api/fetch` in ~25-second
+slices; item pages from `/api/items/read` in batches of 30, two lanes in
+parallel. Each call is retried with growing waits (2 s up to 45 s); a page
+the server still can't get is reported with its index and retried, never taken
+as the end of the data. After each step the job is saved to IndexedDB, so a
+closed tab or dropped connection resumes where it stopped. Item pages that
+still fail after a second pass are counted in the final message and their
+cells left empty.
+
+## Flaky sites
+
+Some single-page apps only load their data on some visits (the Buchmesse
+directory does so about half the time). When a scan comes back as an app
+shell (no paginated or wide data feed, no rich list, under 1,200 characters of
+text), it reloads, up to twice, inside a 55-second budget.
+
+## PDF
+
+PDFs embed DejaVu Sans (in `public/fonts`, Bitstream Vera licence), because
+PDF's built-in fonts only cover Western European text: "Paweł", "Škoda" and
+curly quotes would otherwise come out broken.

@@ -5,9 +5,8 @@
  * headers, cookies). Re-sending it with the page number bumped gets every
  * remaining page without paying for a browser per page.
  */
-import { enrichRowsWithTeam } from "./enrich";
 import { dig, findTotal, flatten, type Flat, type Pagination } from "./records";
-import { resolvesPublic } from "./ssrf";
+import { BlockedFetchError, safeFetch } from "./safe-fetch";
 
 export interface Replay {
   url: string;
@@ -55,13 +54,24 @@ export interface PageResult {
   nextIndex: number;
 }
 
+/** A page that could not be fetched; `index` is where to resume. */
+export class PageError extends Error {
+  constructor(message: string, public index: number) {
+    super(message);
+  }
+}
+
+const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504]);
+
 /**
  * Fetch pages starting at `startIndex` until done or out of time.
- * Returns where to resume, so a client can chain calls past the function time limit.
+ * Returns where to resume, so a client can chain short calls. A page that
+ * fails after retries throws PageError: the caller retries from that page
+ * instead of mistaking the failure for the end of the data.
  */
 export async function* replayPages(
   r: Replay,
-  opts: { startIndex?: number; maxRows?: number; deadline: number; delayMs?: number; enrichTeam?: boolean },
+  opts: { startIndex?: number; maxRows?: number; deadline: number; delayMs?: number },
 ): AsyncGenerator<PageResult> {
   const headers = cleanHeaders(r.headers);
   const method = (r.method || "GET").toUpperCase();
@@ -71,33 +81,33 @@ export async function* replayPages(
 
   while (true) {
     const { url, body } = pageRequest(r, index);
-    if (!(await resolvesPublic(new URL(url).hostname))) throw new Error("The data source points at a private network.");
-
-    const res = await fetch(url, {
-      method,
-      headers: body != null && method !== "GET" ? { "content-type": "application/json", ...headers } : headers,
-      body: body != null && method !== "GET" ? JSON.stringify(body) : undefined,
-      redirect: "manual", // a public host must not bounce us into a private one
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (res.status >= 300) {
-      if (index === (opts.startIndex ?? 0)) throw new Error(`The site answered ${res.status} for its own data request.`);
-      yield { rows: [], total, done: true, nextIndex: index };
-      return;
+    let payload: unknown = null;
+    for (let attempt = 0; ; attempt++) {
+      let status = 0;
+      try {
+        const res = await safeFetch(url, {
+          method,
+          headers: body != null && method !== "GET" ? { "content-type": "application/json", ...headers } : headers,
+          body: body != null && method !== "GET" ? JSON.stringify(body) : undefined,
+          timeoutMs: 30_000,
+        });
+        status = res.status;
+        if (res.ok) {
+          payload = await res.json();
+          break;
+        }
+      } catch (e) {
+        if (e instanceof BlockedFetchError) throw e;
+      }
+      if (attempt >= 2 || (status && !RETRYABLE.has(status))) {
+        throw new PageError(status ? `The site answered ${status} for page ${index + 1} of its data.` : `Page ${index + 1} of the site's data didn't arrive.`, index);
+      }
+      await new Promise((res) => setTimeout(res, 800 * 3 ** attempt));
     }
-    const payload = await res.json();
+
     total ??= findTotal(payload);
     const records = dig(payload, r.jsonPath);
-    let rows = Array.isArray(records) ? records.filter((x) => x && typeof x === "object").map((x) => flatten(x)) : [];
-
-    if (opts.enrichTeam && (r.url.includes("search/exhibitors") || rows.some((row) => row["url"] || row["slug"]))) {
-      try {
-        rows = await enrichRowsWithTeam(rows, { concurrency: 10 });
-      } catch {
-        // preserve base rows on network error
-      }
-    }
-
+    const rows = Array.isArray(records) ? records.filter((x) => x && typeof x === "object").map((x) => flatten(x)) : [];
     index += 1;
     fetched += rows.length;
 
@@ -105,7 +115,7 @@ export async function* replayPages(
     const shortPage = !!r.pagination?.pageSize && rows.length < r.pagination.pageSize;
     const reachedTotal = total != null && (r.pagination?.pageSize ?? rows.length) * index >= total;
     const done = !r.pagination || !rows.length || shortPage || reachedTotal ||
-      (!!opts.maxRows && fetched >= opts.maxRows) || index >= 1000;
+      (!!opts.maxRows && fetched >= opts.maxRows) || index >= 2000;
 
     yield { rows: cappedRows, total, done, nextIndex: index };
     if (done) return;

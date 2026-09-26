@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight, Database, Eye, GripVertical, Plus, ScanLine } from "lucide-react";
+import { ChevronRight, Database, ExternalLink, Eye, FileText, GripVertical, Loader2, Plus, RotateCcw, ScanLine, Sparkles } from "lucide-react";
 import { useState } from "react";
 import type { Column, Feed, FeedField, PageList, Workspace } from "@/lib/model";
 import { feedTitle } from "@/lib/model";
@@ -30,9 +30,10 @@ export function ListsFound(props: {
     );
   }
 
-  const primaryFeeds = otherFeeds.filter(
-    (f) => (f.total && f.total > 15) || active === `feed:${f.id}` || f.endpoint.includes("search/exhibitors")
-  );
+  const size = (f: Feed) => f.total ?? f.rows.length;
+  const primaryFeeds = otherFeeds
+    .filter((f) => (f.total && f.total > 15) || active === `feed:${f.id}` || !!f.ai)
+    .sort((x, y) => size(y) - size(x));
   const remainingFeeds = otherFeeds.filter((f) => !primaryFeeds.includes(f));
 
   // Two lists often share the nearest heading; tell them apart by what they hold.
@@ -78,8 +79,8 @@ export function ListsFound(props: {
                   )}
                 </span>
                 <span className="badge badge-feed">
-                  <Database size={11} aria-hidden="true" />
-                  Directory
+                  {f.ai ? <Sparkles size={11} aria-hidden="true" /> : <Database size={11} aria-hidden="true" />}
+                  {f.ai ? "Read by AI" : "Site data"}
                 </span>
               </span>
             </button>
@@ -155,7 +156,7 @@ export function ColumnTray(props: {
   return (
     <>
       <ul className="cols" aria-label="Columns">
-        {ws.columns.map((c, i) => (
+        {ws.columns.map((c, i) => c.item ? null : (
           <li
             key={c.id}
             className={`col${c.on ? "" : " off"}${drag === c.id ? " dragging" : ""}${over === c.id && drag && drag !== c.id ? " over" : ""}`}
@@ -271,5 +272,116 @@ export function ScopePicker(props: {
         </span>
       </label>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------ item pages */
+
+function estimate(n: number, mode: "static" | "browser"): string {
+  const secs = mode === "browser" ? n * 4 : n / 5;
+  if (secs < 90) return "under 2 minutes";
+  const mins = Math.round(secs / 60);
+  return mins < 60 ? `about ${mins} minutes` : `about ${Math.round(mins / 6) / 10} hours`;
+}
+
+export function ItemFields(props: {
+  ws: Workspace;
+  rowCount: number | null;
+  dispatch: (a: { type: "toggle" | "rename"; id: string; name?: string }) => void;
+  onRetry: () => void;
+  onPaste: (url: string) => void;
+}) {
+  const { ws, rowCount, dispatch, onRetry, onPaste } = props;
+  const [pasted, setPasted] = useState("");
+  const info = ws.items;
+  if (!info) return null;
+  const cols = ws.columns.filter((c) => c.item);
+  const on = cols.filter((c) => c.on);
+  const cat = info.catalogue;
+
+  const row = (c: Column) => (
+    <li key={c.id} className={`col item${c.on ? "" : " off"}`} style={{ ["--ink" as string]: c.ink }}>
+      <span />
+      <button className="cap" aria-pressed={c.on} aria-label={`${c.on ? "Remove" : "Include"} ${c.name}`}
+        title={c.on ? "Included. Click to leave out" : "Left out. Click to include"} onClick={() => dispatch({ type: "toggle", id: c.id })} />
+      <div className="cbody">
+        <input className="cname" value={c.name} aria-label="Column name" onChange={(e) => dispatch({ type: "rename", id: c.id, name: e.target.value })} />
+        <div className="csample" title={c.sample}>{c.sample || <i>empty on the sample page</i>}</div>
+      </div>
+      <span />
+    </li>
+  );
+
+  return (
+    <section className="section">
+      <div className="section-head">
+        <h2>From each item&rsquo;s own page</h2>
+        {cat ? <span className="aside">{on.length} of {cols.length} picked</span> : null}
+      </div>
+
+      {info.status === "looking" && (
+        <p className="note" aria-live="polite"><Loader2 size={14} className="spin" aria-hidden="true" />{info.message ?? "Checking what each item's page shows"}</p>
+      )}
+
+      {info.status === "error" && (
+        <div>
+          <p className="note err" role="alert">{info.message ?? "The item page couldn't be read."}</p>
+          <button className="btn btn-quiet btn-sm" onClick={onRetry}><RotateCcw size={13} aria-hidden="true" />Try again</button>
+        </div>
+      )}
+
+      {info.status === "none" && (
+        <form className="pastebox" onSubmit={(e) => { e.preventDefault(); if (pasted.trim()) onPaste(pasted.trim()); }}>
+          <p className="note">{info.message ?? "Couldn't find pages for these rows automatically."} If each row has a page of its own, open one in your browser and paste its address here.</p>
+          <div className="exportrow">
+            <input className="fname" value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="https://…/one-item" aria-label="One item's page address" inputMode="url" />
+            <button className="btn btn-quiet">Use it</button>
+          </div>
+        </form>
+      )}
+
+      {info.status === "ready" && cat && (
+        <>
+          <p className="note">
+            <FileText size={14} aria-hidden="true" />
+            <span>Read from pages like{" "}
+              <a href={cat.sampleUrl} target="_blank" rel="noreferrer noopener">{cat.title || "this one"}<ExternalLink size={11} aria-hidden="true" style={{ marginLeft: 3, verticalAlign: -1 }} /></a>.
+              {cat.mode === "browser" ? " These pages only load in a browser, so this part is slower." : ""}
+            </span>
+          </p>
+          {cat.lists.map((l) => {
+            const lc = cols.filter((c) => c.item!.listId === l.id);
+            if (!lc.length) return null;
+            return (
+              <div key={l.id}>
+                <div className="subhead">{l.name && l.name !== cat.title ? l.name : "Repeating list"} · {l.count} on the sample page</div>
+                <p className="hint-line" style={{ marginTop: 0 }}>Picking any of these gives one row per entry.</p>
+                <ul className="cols">{lc.map(row)}</ul>
+              </div>
+            );
+          })}
+          {cols.some((c) => !c.item!.listId) && (
+            <>
+              <div className="subhead">About each item</div>
+              <ul className="cols">{cols.filter((c) => !c.item!.listId).map(row)}</ul>
+            </>
+          )}
+          {!cols.length && <p className="note">Nothing extra was found on the sample page.</p>}
+          <details className="extra">
+            <summary><ChevronRight size={14} aria-hidden="true" />Missing something?</summary>
+            <p>These fields come from a few sample pages. If some items show more (a team, contact details), paste the address of one of those pages to use it as the example.</p>
+            <form className="exportrow" onSubmit={(e) => { e.preventDefault(); if (pasted.trim()) onPaste(pasted.trim()); }}>
+              <input className="fname" value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="https://…/one-item" aria-label="Example item page address" inputMode="url" />
+              <button className="btn btn-quiet">Use it</button>
+            </form>
+          </details>
+          {on.length > 0 && rowCount ? (
+            <p className="note warn" style={{ marginTop: 10 }}>
+              Visits {rowCount.toLocaleString()} pages, {estimate(rowCount, cat.mode)}. You can leave it running; progress is saved.
+            </p>
+          ) : null}
+        </>
+      )}
+    </section>
   );
 }

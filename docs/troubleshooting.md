@@ -4,6 +4,16 @@
 out, or needs a login. Try again once; use **Signed-in page** for pages behind
 a login. Sites with aggressive bot protection won't work, by design.
 
+**"The page didn't load its content; trying again."** The site served an
+empty app shell. The scan reloads up to twice. If it still fails, read it again.
+
+**A field I know exists isn't under "From each item's own page".** Only some
+items show it (a team, say), and none of the sampled pages did. Open **Missing
+something?** and paste one item page that shows it.
+
+**"Couldn't find pages for these rows automatically."** Paste the address of
+one row's page; the app learns the pattern from it.
+
 **The page loaded but no list was found.** The content may still have been
 loading. Read the page again. Otherwise click the things you want directly on
 the page; the picker finds the repeating level itself.

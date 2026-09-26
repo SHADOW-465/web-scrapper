@@ -1,0 +1,528 @@
+/**
+ * Information from each item's own page.
+ *
+ * A directory row (an exhibitor, a product, a speaker) usually links to a page
+ * with more about it: team members, website, description. This module:
+ *   1. works out each row's page address (a link on the row, or a pattern
+ *      such as /exhibitor/{slug} discovered and verified against the site);
+ *   2. samples one such page in a real browser and lists what it offers;
+ *   3. reads that same information from every item page, from plain HTML
+ *      when the page is server-rendered (fast, no browser), or with the
+ *      browser when it isn't.
+ */
+import { parseHTML } from "linkedom";
+import { nameFields } from "./ai";
+import { extractorJs, launch, nudge, openPage } from "./browser";
+import { fetchHtml } from "./safe-fetch";
+import { sanitizeStatic } from "./snapshot";
+import { within } from "./within";
+
+/* ------------------------------------------------------------ types */
+
+export interface ItemList { id: string; name: string; itemSelector: string; count: number; people?: boolean }
+
+export interface ItemField {
+  key: string;        // stable id: selector + attribute
+  sel: string;        // absolute (single) or relative to the list item (list)
+  attr: string;       // own | text | href | src
+  multi?: boolean;
+  listId?: string;    // set when the field belongs to a repeating list on the item page
+  name: string;
+  sample: string;
+  staticOK: boolean;  // readable from plain HTML
+  suggested: boolean; // worth ticking by default
+}
+
+export interface ItemCatalogue {
+  sampleUrl: string;
+  title: string;
+  lists: ItemList[];
+  fields: ItemField[];
+  mode: "static" | "browser";
+}
+
+export interface ItemSpec {
+  lists: Array<{ id: string; itemSelector: string }>;
+  fields: Array<{ key: string; sel: string; attr: string; multi?: boolean; listId?: string }>;
+  mode: "static" | "browser";
+}
+
+export interface ItemResult {
+  url: string;
+  ok: boolean;
+  error?: string;
+  values?: Record<string, string>;
+  lists?: Record<string, Array<Record<string, string>>>;
+}
+
+/* ------------------------------------------------------------ static reading */
+
+const clean = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
+
+function ownText(el: Element): string {
+  let t = "";
+  el.childNodes.forEach((n) => {
+    if (n.nodeType === 3) t += n.nodeValue ?? "";
+  });
+  return clean(t);
+}
+
+function readValue(el: Element | null, attr: string, base: string): string {
+  if (!el) return "";
+  if (attr === "href") {
+    const h = el.getAttribute("href");
+    if (!h) return "";
+    if (/^(mailto|tel):/i.test(h)) return h.replace(/^(mailto|tel):/i, "").split("?")[0];
+    try {
+      return new URL(h, base).href;
+    } catch {
+      return h;
+    }
+  }
+  if (attr === "src") {
+    const s = el.getAttribute("src") || el.getAttribute("data-src") || "";
+    if (!s || s.startsWith("data:")) return "";
+    try {
+      return new URL(s, base).href;
+    } catch {
+      return s;
+    }
+  }
+  if (attr === "own") return ownText(el) || (el.children.length ? "" : clean(el.textContent));
+  return clean(el.textContent);
+}
+
+/**
+ * Browsers insert <tbody> into every table; HTML parsers without a browser
+ * often don't. Selectors learned in a browser mention it, so try without.
+ */
+const noTbody = (sel: string) => sel.replace(/ > tbody(?= >)/g, "");
+
+function one(root: ParentNode, sel: string): Element | null {
+  try {
+    return root.querySelector(sel) ?? (sel.includes("tbody") ? root.querySelector(noTbody(sel)) : null);
+  } catch {
+    return null;
+  }
+}
+
+function many(root: ParentNode, sel: string): Element[] {
+  try {
+    const got = Array.from(root.querySelectorAll(sel));
+    return got.length || !sel.includes("tbody") ? got : Array.from(root.querySelectorAll(noTbody(sel)));
+  } catch {
+    return [];
+  }
+}
+
+function query(root: Element, sel: string): Element | null {
+  return sel ? one(root, `:scope > ${sel}`) : root;
+}
+
+function queryAll(root: Element, sel: string): Element[] {
+  return sel ? many(root, `:scope > ${sel}`) : [root];
+}
+
+/** Apply an item spec to a page's plain HTML. */
+export function extractStatic(html: string, url: string, spec: ItemSpec): Pick<ItemResult, "values" | "lists"> {
+  const { document } = parseHTML(html);
+  const values: Record<string, string> = {};
+  for (const f of spec.fields) {
+    if (f.listId) continue;
+    values[f.key] = readValue(one(document, f.sel), f.attr, url);
+  }
+  const lists: Record<string, Array<Record<string, string>>> = {};
+  for (const l of spec.lists) {
+    const items = many(document, l.itemSelector);
+    const fields = spec.fields.filter((f) => f.listId === l.id);
+    lists[l.id] = items
+      .map((it) => Object.fromEntries(fields.map((f) => [
+        f.key,
+        f.multi ? queryAll(it, f.sel).map((e) => readValue(e, f.attr, url)).filter(Boolean).join(", ") : readValue(query(it, f.sel), f.attr, url),
+      ])))
+      .filter((r) => Object.values(r).some(Boolean));
+  }
+  return { values, lists };
+}
+
+/* ------------------------------------------------------------ finding item pages */
+
+const norm = (s: unknown) => String(s ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+const SLUGISH = /^[\p{L}\p{N}][\p{L}\p{N}._~%-]{1,150}$/u;
+const COMMON = ["item", "items", "detail", "details", "profile", "profiles", "company", "companies", "exhibitor", "exhibitors",
+  "product", "products", "p", "people", "person", "member", "members", "speaker", "speakers", "event", "events", "listing", "listings"];
+const NOISE_SEG = /^(api|v\d+|search|list|lists|query|graphql|index|marketplace|directory|output|data|en|de|fr|es|it)$/i;
+
+function singular(w: string) {
+  if (/ies$/i.test(w)) return w.slice(0, -3) + "y";
+  if (/ses$/i.test(w)) return w.slice(0, -2);
+  if (/s$/i.test(w) && !/ss$/i.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+/** Page-address patterns worth trying, most likely first. */
+export function candidatePatterns(origin: string, hintPaths: string[]): string[] {
+  const words: string[] = [];
+  for (const p of hintPaths) {
+    const segs = p.split("/").filter((s) => s && !NOISE_SEG.test(s) && !/^\d+$/.test(s) && /^[a-z-]+$/i.test(s));
+    for (const s of segs.reverse()) for (const w of [singular(s), s]) if (!words.includes(w)) words.push(w);
+  }
+  for (const w of COMMON) if (!words.includes(w)) words.push(w);
+  const locales = [""];
+  for (const p of hintPaths) {
+    const m = p.match(/^\/([a-z]{2})(\/|$)/i);
+    if (m && !locales.includes(`/${m[1]}`)) locales.push(`/${m[1]}`);
+  }
+  const out: string[] = [];
+  for (const w of words.slice(0, 8)) for (const l of locales) out.push(`${origin}${l}/${w}/{v}`);
+  return out;
+}
+
+export interface Discovery { key: string; pattern: string }
+
+/**
+ * Work out how a row's value maps to its page, e.g. "/exhibitor/{url}".
+ * A pattern only counts when the page it produces mentions the row it's for.
+ */
+export async function discoverPattern(input: {
+  origin: string;
+  hintPaths: string[];
+  candidates: Array<{ key: string; values: string[] }>; // row values, same row order
+  verify: string[];                                     // per row: text the page should contain (a name)
+  cookie?: string;
+}): Promise<Discovery | null> {
+  const patterns = candidatePatterns(input.origin, input.hintPaths);
+  const keys = input.candidates.filter((c) => c.values[0] && SLUGISH.test(c.values[0])).slice(0, 4);
+  let probes = 0;
+  for (const c of keys) {
+    for (const pattern of patterns) {
+      if (++probes > 28) return null;
+      const url = pattern.replace("{v}", encodeURIComponent(c.values[0]).replace(/%2F/gi, "/"));
+      try {
+        const { status, html } = await fetchHtml(url, input.cookie, 8000);
+        if (status !== 200 || !html) continue;
+        const text = norm(html);
+        const want = norm(input.verify[0]).slice(0, 40);
+        if ((want && text.includes(want)) || (!want && text.includes(norm(c.values[0])))) {
+          // Negative control: some sites answer every address with the same page.
+          // If a made-up item passes the same test, the pattern proves nothing.
+          const fake = await fetchHtml(pattern.replace("{v}", "zz-no-such-item-7f3a9"), input.cookie, 8000).catch(() => null);
+          if (fake && fake.status === 200 && ((want && norm(fake.html).includes(want)) || norm(fake.html) === text)) continue;
+          // Confirm on a second row so a catch-all page can't pass.
+          if (c.values[1] && input.verify[1]) {
+            const second = await fetchHtml(pattern.replace("{v}", encodeURIComponent(c.values[1])), input.cookie, 8000).catch(() => null);
+            if (!second || second.status !== 200 || !norm(second.html).includes(norm(input.verify[1]).slice(0, 40))) continue;
+          }
+          return { key: c.key, pattern };
+        }
+      } catch {
+        /* blocked or unreachable: try the next pattern */
+      }
+    }
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------ sampling */
+
+interface EngineList { id: string; name: string; count: number; itemSelector: string; chrome?: boolean; people?: boolean; columns: Array<{ key: string; sel: string; attr: string; multi?: boolean; name: string; values: string[] }> }
+interface EngineSingle { key: string; sel: string; attr: string; name: string; value: string }
+
+const JUNK_TEXT = /^(sign in|log ?in|register|register now|show (all|more)|read more|see (all|more)|more|back|next|previous|share|follow|menu|close|accept|cookie|home|marketplace|search|filters?)$/i;
+
+/**
+ * What kinds of content a page has: its site-assigned hooks and class names,
+ * minus scripts and page chrome. Pages differ from each other in these when
+ * one has a section the others lack (a team, a product list).
+ */
+function features(html: string): { set: Set<string>; text: number } {
+  const { document } = parseHTML(html);
+  document.querySelectorAll("script, style, noscript, template, svg, nav, header, footer").forEach((e: Element) => e.remove());
+  const set = new Set<string>();
+  document.body?.querySelectorAll("*").forEach((el: Element) => {
+    const t = el.getAttribute("data-testid");
+    if (t) set.add(`t:${t}`);
+    const st = el.getAttribute("data-styleid");
+    if (st) set.add(`s:${st}`);
+    for (const c of (el.getAttribute("class") ?? "").split(/\s+/)) if (c && c.length < 60) set.add(`c:${c}`);
+  });
+  return { set, text: clean(document.body?.textContent).length };
+}
+
+/**
+ * Pick pages that together show the most different kinds of content: at least
+ * `min`, then more for as long as each adds a few kinds not seen yet (a team
+ * section on one page in six is exactly the kind of thing worth catching).
+ */
+function diverse(pages: Array<{ url: string; html: string }>, min: number, max: number): Array<{ url: string; html: string }> {
+  const scored = pages.filter((p) => p.html).map((p) => ({ ...p, f: features(p.html) }));
+  const chosen: typeof scored = [];
+  const covered = new Set<string>();
+  while (chosen.length < max && scored.length) {
+    let best = 0;
+    let bestGain = -1;
+    let bestScore = -1;
+    scored.forEach((p, i) => {
+      // The site's own field hooks say what a section is; class names mostly say how it looks.
+      let gain = 0;
+      let styling = 0;
+      p.f.set.forEach((x) => {
+        if (covered.has(x)) return;
+        if (x.startsWith("c:")) styling++;
+        else gain++;
+      });
+      const score = gain * 1000 + styling + p.f.text / 1000;
+      if (score > bestScore) { bestScore = score; bestGain = gain; best = i; }
+    });
+    if (chosen.length >= min && bestGain < 3) break;
+    const [pick] = scored.splice(best, 1);
+    pick.f.set.forEach((x) => covered.add(x));
+    chosen.push(pick);
+  }
+  const rest = pages.filter((p) => !p.html).slice(0, Math.max(0, min - chosen.length));
+  return [...chosen.map(({ url, html }) => ({ url, html })), ...rest];
+}
+
+/**
+ * Open item pages and list everything they offer. The first row's page is
+ * often a sparse one (no team, no description), so up to 32 are fetched
+ * cheaply, the six that differ most are analysed, and their fields merged.
+ */
+export async function sampleItemPage(urls: string[], cookie?: string): Promise<ItemCatalogue> {
+  const deadline = Date.now() + 75_000; // the route has 120 s; leave room for naming and the reply
+  const queue = urls.slice(0, 24);
+  const fetched: Array<{ url: string; html: string }> = [];
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    while (queue.length && Date.now() < deadline - 45_000) {
+      const u = queue.shift()!;
+      const r = await fetchHtml(u, cookie, 10_000).catch(() => null);
+      fetched.push({ url: u, html: r?.status === 200 ? r.html : "" });
+    }
+  }));
+  // Rendering plain HTML is cheap: look at every page that adds something new.
+  const chosen = diverse(fetched, 4, 10);
+
+  type Found = { lists: EngineList[]; singles: EngineSingle[] };
+  const useful = (f: Found | null) => !!f && (f.lists.some((l) => !l.chrome && l.columns.length > 0) || f.singles.length >= 3);
+  const pages: Array<{ url: string; html: string; found: Found; title: string }> = [];
+  const browser = await launch();
+  try {
+    for (const c of chosen) {
+      if (Date.now() > deadline && pages.length) break;
+      const page = await openPage(browser, c.url, cookie);
+      try {
+        // Detect on the plain HTML first, laid out with its stylesheets but no
+        // scripts: selectors found there work for the fast no-browser reader
+        // by construction. Only an empty shell falls back to the live page.
+        let found: Found | null = null;
+        if (c.html) {
+          const inert = sanitizeStatic(c.html, c.url).replace(/<head(\s[^>]*)?>/i, (m) => `${m}<base href="${c.url.replace(/"/g, "&quot;")}">`);
+          await page.setContent(inert, { waitUntil: "load", timeout: 12_000 }).catch(() => undefined);
+          await within(page.addScriptTag({ content: extractorJs() }).then(() => undefined), 5_000, undefined);
+          found = await within(page.evaluate("window.__ss ? (window.__SS_LAX__ = true, window.__ss.detectItemPage()) : null") as Promise<Found | null>, 15_000, null);
+          if (!useful(found)) found = null;
+        }
+        if (!found) {
+          await page.goto(c.url, { waitUntil: "domcontentloaded", timeout: 35_000 });
+          await page.waitForNetworkIdle({ idleTime: 800, timeout: 9_000 }).catch(() => undefined);
+          await nudge(page, 2);
+          await page.addScriptTag({ content: extractorJs() });
+          found = (await page.evaluate("window.__ss.detectItemPage()")) as Found;
+        }
+        pages.push({ url: c.url, html: c.html, found, title: await page.title().catch(() => "") });
+      } catch {
+        /* one sample failing is fine as long as another works */
+      } finally {
+        await page.close().catch(() => undefined);
+      }
+    }
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+  if (!pages.length) throw new Error("The item pages couldn't be opened.");
+
+  // Merge: lists match across pages by their selector, fields by selector + attribute.
+  const listIds = new Map<string, string>();
+  const lists: ItemList[] = [];
+  const people = new Set<string>();
+  const fields = new Map<string, ItemField & { hits: number; from: string; values: string[] }>();
+  for (const pg of pages) {
+    for (const l of pg.found.lists.slice(0, 30)) {
+      if (l.chrome) continue;
+      const cols = l.columns.filter((c) => c.values.some(Boolean) && !JUNK_TEXT.test(c.values.find(Boolean) ?? ""));
+      if (!cols.length) continue;
+      let id = listIds.get(l.itemSelector);
+      if (!id) {
+        id = `L${listIds.size + 1}`;
+        listIds.set(l.itemSelector, id);
+        lists.push({ id, name: l.name, itemSelector: l.itemSelector, count: l.count });
+      } else {
+        const known = lists.find((x) => x.id === id)!;
+        known.count = Math.max(known.count, l.count);
+      }
+      if (l.people) people.add(id);
+      for (const c of cols) {
+        const key = `${id}|${c.key}`;
+        const f = fields.get(key);
+        const joined = c.values.join("\u0001");
+        if (f) {
+          f.hits++;
+          f.values.push(joined);
+        } else fields.set(key, { key, sel: c.sel, attr: c.attr, multi: c.multi, listId: id, name: c.name,
+          sample: c.values.find(Boolean) ?? "", staticOK: false, suggested: c.attr === "own" || c.attr === "text", hits: 1, from: pg.url, values: [joined] });
+      }
+    }
+    for (const sg of pg.found.singles) {
+      if (JUNK_TEXT.test(sg.value)) continue;
+      const f = fields.get(sg.key);
+      if (f) {
+        f.hits++;
+        f.values.push(sg.value);
+      } else fields.set(sg.key, { key: sg.key, sel: sg.sel, attr: sg.attr, name: sg.name, sample: sg.value, staticOK: false, suggested: true, hits: 1, from: pg.url, values: [sg.value] });
+    }
+  }
+
+  // A "list" that never shows more than one entry is just a section, unless
+  // it holds people (a team of one is still where the contact is).
+  for (const l of lists) {
+    if (l.count < 2 && !people.has(l.id)) for (const [k, f] of fields) if (f.listId === l.id) fields.delete(k);
+  }
+
+  // Identical on two different items' pages means site furniture (footer,
+  // menus, fixed headings), not information about the item: drop it.
+  for (const [key, f] of fields) {
+    if (f.values.length > 1 && f.values.every((v) => v === f.values[0])) fields.delete(key);
+  }
+
+  // Readable from plain HTML? Check each field against the page it was seen on.
+  const all = [...fields.values()];
+  const spec: ItemSpec = { lists: lists.map((l) => ({ id: l.id, itemSelector: l.itemSelector })), fields: all, mode: "static" };
+  const staticRead = new Map(pages.filter((pg) => pg.html).map((pg) => [pg.url, extractStatic(pg.html, pg.url, spec)]));
+  for (const f of all) {
+    const r = staticRead.get(f.from);
+    // For a list, any entry may be the one the sample came from.
+    f.staticOK = f.listId
+      ? !!r?.lists?.[f.listId]?.some((row) => !!row[f.key] && norm(row[f.key]) === norm(f.sample))
+      : !!r?.values?.[f.key] && norm(r.values[f.key]) === norm(f.sample);
+    // A single field seen on only one of several pages is usually page-specific noise.
+    if (!f.listId && pages.length >= 3 && f.hits < 2) f.suggested = false;
+  }
+
+  const title = pages[0].title;
+  const named = await nameFields(title, all.map((f) => ({ key: f.key, current: f.name, samples: [f.sample] })));
+  if (named) {
+    for (const f of all) {
+      const n = named[f.key];
+      if (n) {
+        f.name = n.label;
+        if (!n.keep) f.suggested = false;
+      }
+    }
+  }
+
+  // Lists first (they are usually why item pages matter), then the rest.
+  const rank = (f: ItemField) => (f.listId ? (people.has(f.listId) ? 0 : 2) : 1);
+  const ordered = all.sort((x, y) => rank(x) - rank(y) || Number(y.suggested) - Number(x.suggested));
+  const readable = ordered.filter((f) => f.suggested);
+  const staticShare = readable.length ? readable.filter((f) => f.staticOK).length / readable.length : 1;
+  return {
+    sampleUrl: pages[0].url,
+    title,
+    lists: lists.filter((l) => ordered.some((f) => f.listId === l.id)).map((l) => ({ ...l, people: people.has(l.id) }))
+      .sort((a, b) => Number(!!b.people) - Number(!!a.people)),
+    fields: ordered.map(({ hits: _h, from: _f, values: _v, ...f }) => f),
+    mode: staticShare >= 0.6 ? "static" : "browser",
+  };
+}
+
+/* ------------------------------------------------------------ bulk reading */
+
+const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+async function readOneStatic(url: string, spec: ItemSpec, cookie?: string): Promise<ItemResult> {
+  for (let attempt = 0; ; attempt++) {
+    let status = 0;
+    try {
+      const r = await fetchHtml(url, cookie, 20_000);
+      status = r.status;
+      if (r.status === 200 && r.html) return { url, ok: true, ...extractStatic(r.html, url, spec) };
+    } catch {
+      /* network error: retry */
+    }
+    if (attempt >= 2 || (status && !RETRYABLE.has(status))) {
+      return { url, ok: false, error: status ? `answered ${status}` : "did not respond" };
+    }
+    await new Promise((res) => setTimeout(res, 1000 * 3 ** attempt));
+  }
+}
+
+/** Read many item pages; stops at the deadline and reports what's left. */
+export async function readItems(
+  urls: string[],
+  spec: ItemSpec,
+  opts: { cookie?: (url: string) => string | undefined; deadline: number; concurrency?: number; onResult: (r: ItemResult) => void },
+): Promise<string[]> {
+  const queue = [...urls];
+  if (spec.mode === "browser") {
+    const browser = await launch();
+    try {
+      while (queue.length && Date.now() < opts.deadline) {
+        const url = queue.shift()!;
+        try {
+          const page = await openPage(browser, url, opts.cookie?.(url));
+          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+          await page.waitForNetworkIdle({ idleTime: 700, timeout: 8_000 }).catch(() => undefined);
+          const html = await page.content();
+          await page.close().catch(() => undefined);
+          opts.onResult({ url, ok: true, ...extractStatic(html, url, spec) });
+        } catch (e) {
+          opts.onResult({ url, ok: false, error: e instanceof Error ? e.message.split("\n")[0] : "failed" });
+        }
+      }
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+    return queue;
+  }
+
+  const workers = Array.from({ length: Math.min(opts.concurrency ?? 6, queue.length) }, async () => {
+    while (queue.length && Date.now() < opts.deadline) {
+      const url = queue.shift()!;
+      opts.onResult(await readOneStatic(url, spec, opts.cookie?.(url)));
+    }
+  });
+  await Promise.all(workers);
+  return queue;
+}
+
+/* ------------------------------------------------------------ self-check */
+
+export function selfCheck(): string {
+  const html = `<html><body><h1>Acme GmbH</h1>
+    <div data-testid="country">Germany</div>
+    <div class="team"><div class="m"><b>Anna Roth</b><i>CEO</i></div><div class="m"><b>Ben Kurz</b><i>CTO</i></div></div>
+    <a href="mailto:hi@acme.test">mail</a></body></html>`;
+  const spec: ItemSpec = {
+    mode: "static",
+    lists: [{ id: "l1", itemSelector: "body > div.team > div.m" }],
+    fields: [
+      { key: "h", sel: "body > h1", attr: "text" },
+      { key: "c", sel: '[data-testid="country"]', attr: "own" },
+      { key: "e", sel: "body > a", attr: "href" },
+      { key: "n", sel: "b", attr: "own", listId: "l1" },
+      { key: "d", sel: "i", attr: "own", listId: "l1" },
+    ],
+  };
+  const r = extractStatic(html, "https://acme.test/x", spec);
+  if (r.values?.h !== "Acme GmbH" || r.values?.c !== "Germany") throw new Error(`singles wrong ${JSON.stringify(r.values)}`);
+  if (r.values?.e !== "hi@acme.test") throw new Error("mailto not stripped");
+  if (r.lists?.l1?.length !== 2 || r.lists.l1[1].n !== "Ben Kurz" || r.lists.l1[1].d !== "CTO") throw new Error(`list wrong ${JSON.stringify(r.lists)}`);
+  const table = extractStatic("<html><body><table><tr><th>UPC</th><td>abc123</td></tr></table></body></html>", "https://a.test/", {
+    mode: "static", lists: [], fields: [{ key: "u", sel: "body > table > tbody > tr > td", attr: "text" }],
+  });
+  if (table.values?.u !== "abc123") throw new Error(`tbody fallback failed: ${JSON.stringify(table.values)}`);
+  const pats = candidatePatterns("https://e.test", ["/api/v1/search/exhibitors", "/en/marketplace/exhibitors"]);
+  if (pats[0] !== "https://e.test/exhibitor/{v}") throw new Error(`pattern order wrong: ${pats[0]}`);
+  if (!pats.includes("https://e.test/en/exhibitor/{v}")) throw new Error("locale pattern missing");
+  return "items ok";
+}

@@ -5,32 +5,40 @@
  * The snapshot is what the user points at. The captured responses are how we
  * get past the first page: once the user's picks are matched to one of them,
  * we replay that request for every page (see replay.ts and correlate.ts).
+ *
+ * Fallbacks, in order: a pasted JSON API address is read directly; if Chromium
+ * can't start, the page's plain HTML is used; if nothing structured is found
+ * and a Groq key is set, AI reads records from the page text.
  */
 import type { Browser, HTTPResponse } from "puppeteer-core";
-import { extractorJs, launch, nudge, openPage, USER_AGENT } from "./browser";
-import { enrichRowsWithTeam } from "./enrich";
+import { parseHTML } from "linkedom";
+import { aiEnabled, extractRecords, nameFields } from "./ai";
+import { extractorJs, launch, nudge, openPage } from "./browser";
 import { detectPagination, findRecordSets, findTotal, flatten, humanizeKey, isPlumbing, type Flat } from "./records";
 import type { Replay } from "./replay";
-import { buildSyntheticSnapshot, captureSnapshot } from "./snapshot";
+import { fetchHtml, safeFetch, UA } from "./safe-fetch";
+import { captureSnapshot, sanitizeStatic, wrapSnapshot } from "./snapshot";
 import { seal } from "./token";
+import { within } from "./within";
 
 export interface ApiField {
-  key: string;      // dotted JSON path; never shown as the primary label
-  label: string;    // what a person would call it
+  key: string;       // dotted JSON path; never shown as the primary label
+  label: string;     // what a person would call it
   sample: string;
-  fill: number;     // share of sampled rows with a value
+  fill: number;      // share of sampled rows with a value
   plumbing: boolean; // ids, flags, counters: hidden unless asked for
 }
 
 export interface ApiSource {
   id: string;
-  token: string;          // sealed Replay; opaque to the client
-  endpoint: string;       // "POST /api/v1/search/exhibitors" for the technical-details drawer
+  token: string;        // sealed Replay; opaque to the client ("" when rows are complete)
+  endpoint: string;     // for the technical-details line only
   jsonPath: string;
-  rows: Flat[];           // the rows this one response held, for matching against the page
-  total: number | null;   // what the server says exists across all pages
+  rows: Flat[];         // the rows this response held (all of them when not paginated)
+  total: number | null; // what the server says exists across all pages
   paginated: boolean;
   fields: ApiField[];
+  ai?: boolean;         // read by AI from page text, not from the site's data
 }
 
 export interface ScanResult {
@@ -54,39 +62,7 @@ interface Captured {
 const MAX_CAPTURES = 80;
 const SAMPLE_ROWS = 80;
 
-const PRIORITY_KEYS = [
-  "name", "company", "person_name", "representative", "designation", "position", "role",
-  "stands.0.hall", "hall", "stands.0.stand", "stand", "country", "url", "profile_url",
-  "description", "about"
-];
-
-function sortFields(fields: ApiField[]): ApiField[] {
-  return [...fields].sort((a, b) => {
-    const ai = PRIORITY_KEYS.indexOf(a.key.toLowerCase());
-    const bi = PRIORITY_KEYS.indexOf(b.key.toLowerCase());
-    if (ai !== -1 && bi !== -1) return ai - bi;
-    if (ai !== -1) return -1;
-    if (bi !== -1) return 1;
-    return 0;
-  });
-}
-
-function sanitizeScanUrl(rawUrl: string): string {
-  try {
-    const u = new URL(rawUrl);
-    if (u.hostname.includes("buchmesse.de")) {
-      const limit = Number(u.searchParams.get("limit"));
-      if (limit && limit < 12) {
-        u.searchParams.set("limit", "36");
-      }
-    }
-    return u.toString();
-  } catch {
-    return rawUrl;
-  }
-}
-
-function profile(rows: Flat[]): ApiField[] {
+export function profile(rows: Flat[]): ApiField[] {
   const keys: string[] = [];
   for (const r of rows) for (const k of Object.keys(r)) if (!keys.includes(k)) keys.push(k);
   return keys.map((key) => {
@@ -120,188 +96,95 @@ function datasetKey(method: string, url: string, body: unknown, jsonPath: string
   return `${method} ${u.origin}${u.pathname}?${[...u.searchParams].sort().join("&")} ${JSON.stringify(b)} ${jsonPath}`;
 }
 
-async function tryFastPathProbe(
-  url: string,
-  opts: { cookie?: string; status?: (text: string) => void } = {},
-): Promise<ScanResult | null> {
-  const say = opts.status ?? (() => undefined);
-
-  // 1. Frankfurt Buchmesse catalog direct API fast-path
-  if (url.includes("buchmesse.de")) {
-    try {
-      say("Connecting to catalog API directly (fast path)...");
-      const apiUrl = "https://event.buchmesse.de/api/v1/search/exhibitors";
-      const apiBody = { page: 1, limit: 36 };
-      const res = await fetch(apiUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "user-agent": USER_AGENT,
-          accept: "application/json",
-          ...(opts.cookie ? { cookie: opts.cookie } : {}),
-        },
-        body: JSON.stringify(apiBody),
-        signal: AbortSignal.timeout(8000),
-      });
-
-      if (res.ok) {
-        const payload = (await res.json()) as {
-          data?: { list?: unknown[]; total?: number };
-          total?: number;
-        };
-        const rawRecords = payload.data?.list || [];
-        if (Array.isArray(rawRecords) && rawRecords.length > 0) {
-          let rows = rawRecords.slice(0, SAMPLE_ROWS).map((r) => flatten(r as Record<string, unknown>));
-          say("Fetching key representative contacts...");
-          try {
-            const topEnriched = await enrichRowsWithTeam(rows.slice(0, 6), { concurrency: 6 });
-            rows.splice(0, 6, ...topEnriched);
-          } catch {
-            // best-effort preview enrichment
-          }
-
-          let fields = profile(rows);
-          if (!fields.some((f) => f.key === "person_name")) {
-            fields.unshift({
-              key: "person_name",
-              label: "Representative Name",
-              sample: "Paweł Kopijer",
-              fill: 0.8,
-              plumbing: false,
-            });
-          }
-          if (!fields.some((f) => f.key === "designation")) {
-            fields.unshift({
-              key: "designation",
-              label: "Designation",
-              sample: "Author / IP Owner",
-              fill: 0.8,
-              plumbing: false,
-            });
-          }
-          fields = sortFields(fields);
-
-          const total = payload.data?.total || payload.total || 4043;
-          const pagination = { style: "body_page" as const, key: "page", first: 1, limitKey: "limit", pageSize: 36 };
-          const replay: Replay = {
-            url: apiUrl,
-            method: "POST",
-            headers: { "content-type": "application/json", "user-agent": USER_AGENT },
-            body: apiBody,
-            jsonPath: "data.list",
-            pagination,
-          };
-
-          const title = "Frankfurter Buchmesse Exhibitors Directory";
-          const snap = buildSyntheticSnapshot(url, title, rows, extractorJs());
-
-          const source: ApiSource = {
-            id: "api1",
-            token: seal(replay),
-            endpoint: "POST event.buchmesse.de/api/v1/search/exhibitors",
-            jsonPath: "data.list",
-            rows,
-            total,
-            paginated: true,
-            fields,
-          };
-
-          return {
-            url,
-            finalUrl: url,
-            title,
-            snapshot: snap.html,
-            snapshotBytes: snap.bytes,
-            apis: [source],
-            notes: ["Direct API Fast-Path: Connected directly to catalog API. Full dataset (4,000+ exhibitors) ready for export."],
-          };
-        }
+/** Give feed fields human names (and hide junk) with AI, when a key is set. */
+async function polishNames(title: string, apis: ApiSource[]) {
+  if (!aiEnabled()) return;
+  const worth = [...apis].sort((a, b) => (b.total ?? b.rows.length) - (a.total ?? a.rows.length)).slice(0, 3);
+  await Promise.all(worth.map(async (api) => {
+    const visible = api.fields.filter((f) => !f.plumbing && f.fill > 0.1);
+    const named = await nameFields(`${title} (${api.endpoint})`, visible.map((f) => ({
+      key: f.key,
+      current: f.label,
+      samples: api.rows.map((r) => String(r[f.key] ?? "")).filter(Boolean).slice(0, 3),
+    })));
+    if (!named) return;
+    for (const f of api.fields) {
+      const n = named[f.key];
+      if (n) {
+        f.label = n.label;
+        if (!n.keep) f.plumbing = true;
       }
-    } catch {
-      // fallback to browser scan
     }
+  }));
+}
+
+function aiSource(rows: Array<Record<string, string>>): ApiSource {
+  return {
+    id: "ai1", token: "", endpoint: "Read by AI from the page text", jsonPath: "", rows,
+    total: rows.length, paginated: false, ai: true, fields: profile(rows).map((f) => ({ ...f, plumbing: false })),
+  };
+}
+
+/** The user pasted an API address itself: read it directly, no browser. */
+async function readJsonAddress(url: string, cookie?: string): Promise<ScanResult | null> {
+  let res: Response;
+  try {
+    res = await safeFetch(url, {
+      headers: { accept: "application/json, text/plain, */*", "user-agent": UA, ...(cookie ? { cookie } : {}) },
+      timeoutMs: 12_000,
+    });
+  } catch {
+    return null;
   }
+  if (!res.ok || !(res.headers.get("content-type") ?? "").toLowerCase().includes("json")) return null;
+  const payload = await res.json().catch(() => null);
+  const sets = payload ? findRecordSets(payload) : [];
+  const best = sets.sort((a, b) => b.records.length - a.records.length)[0];
+  if (!best || best.records.length < 2) return null;
+  const rows = best.records.slice(0, SAMPLE_ROWS).map((r) => flatten(r));
+  const pagination = detectPagination(url, null);
+  const replay: Replay = { url, method: "GET", headers: { accept: "application/json", "user-agent": UA, ...(cookie ? { cookie } : {}) }, body: null, jsonPath: best.path, pagination };
+  const u = new URL(url);
+  const title = `Data from ${u.hostname}`;
+  const snap = wrapSnapshot(
+    `<!doctype html><html><head><title>${title}</title></head><body style="font:15px system-ui;padding:32px;color:#222"><h1 style="font-size:20px">${title}</h1><p>This address returns data directly, so there is no page to show. Pick the fields you want on the right.</p></body></html>`,
+    url, extractorJs(),
+  );
+  const apis: ApiSource[] = [{
+    id: "api1", token: seal(replay), endpoint: `GET ${u.host}${u.pathname}`, jsonPath: best.path, rows,
+    total: findTotal(payload), paginated: !!pagination, fields: profile(rows),
+  }];
+  await polishNames(title, apis);
+  return { url, finalUrl: url, title, snapshot: snap.html, snapshotBytes: snap.bytes, apis, notes: [] };
+}
 
-  // 2. Generic direct JSON API detection (e.g., user pasted a REST / API endpoint)
-  const isLikelyApi =
-    url.includes("/api/") ||
-    url.includes(".json") ||
-    url.includes("/v1/") ||
-    url.includes("/v2/") ||
-    url.includes("/graphql");
-
-  if (isLikelyApi) {
-    try {
-      say("Probing direct JSON endpoint (fast path)...");
-      const probeRes = await fetch(url, {
-        headers: {
-          accept: "application/json, text/plain, */*",
-          "user-agent": USER_AGENT,
-          ...(opts.cookie ? { cookie: opts.cookie } : {}),
-        },
-        signal: AbortSignal.timeout(7000),
-      });
-
-      const contentType = (probeRes.headers.get("content-type") || "").toLowerCase();
-      if (probeRes.ok && contentType.includes("json")) {
-        const payload = (await probeRes.json()) as Record<string, unknown>;
-        const recordSets = findRecordSets(payload);
-        if (recordSets.length > 0 && recordSets[0].records.length >= 2) {
-          const bestSet = recordSets[0];
-          const rows = bestSet.records.slice(0, SAMPLE_ROWS).map((r) => flatten(r as Record<string, unknown>));
-          const pagination = detectPagination(url, null);
-          const total = findTotal(payload);
-          const fields = sortFields(profile(rows));
-          const u = new URL(url);
-          const replay: Replay = {
-            url,
-            method: "GET",
-            headers: { accept: "application/json", "user-agent": USER_AGENT },
-            body: null,
-            jsonPath: bestSet.path,
-            pagination,
-          };
-          const title = `${u.hostname} Data Feed`;
-          const snap = buildSyntheticSnapshot(url, title, rows, extractorJs());
-          const source: ApiSource = {
-            id: "api1",
-            token: seal(replay),
-            endpoint: `GET ${u.host}${u.pathname}`,
-            jsonPath: bestSet.path,
-            rows,
-            total,
-            paginated: !!pagination,
-            fields,
-          };
-          return {
-            url,
-            finalUrl: url,
-            title,
-            snapshot: snap.html,
-            snapshotBytes: snap.bytes,
-            apis: [source],
-            notes: ["Direct JSON API discovered. Complete data feed loaded without browser rendering."],
-          };
-        }
-      }
-    } catch {
-      // fallback to browser scan
-    }
-  }
-
-  return null;
+/** Chromium couldn't start: use the page's plain HTML (fine for server-rendered sites). */
+async function scanWithoutBrowser(url: string, cookie: string | undefined, say: (t: string) => void): Promise<ScanResult> {
+  say("Reading the page without a browser");
+  const { status, html, finalUrl } = await fetchHtml(url, cookie, 20_000);
+  if (status !== 200 || !html) throw new Error(`The site answered ${status || "nothing"} for that page.`);
+  const inert = sanitizeStatic(html, finalUrl);
+  const { document } = parseHTML(inert);
+  const title = document.title ?? "";
+  const snap = wrapSnapshot(inert, finalUrl, extractorJs());
+  const notes = ["Read without a browser, so content that only appears after the page's scripts run may be missing."];
+  const apis: ApiSource[] = [];
+  const records = await extractRecords(title, (document.body?.textContent ?? "").replace(/\s+/g, " "));
+  if (records) apis.push(aiSource(records));
+  return { url, finalUrl, title, snapshot: snap.html, snapshotBytes: snap.bytes, apis, notes };
 }
 
 export async function scan(
-  rawUrl: string,
+  url: string,
   opts: { cookie?: string; status?: (text: string) => void } = {},
 ): Promise<ScanResult> {
-  const url = sanitizeScanUrl(rawUrl);
   const say = opts.status ?? (() => undefined);
 
-  // Fast-path probe before starting a heavy browser
-  const fast = await tryFastPathProbe(url, opts);
-  if (fast) return fast;
+  if (/\/api\/|\.json(\?|$)|\/v\d+\/|graphql/i.test(url)) {
+    say("Reading the data address directly");
+    const direct = await readJsonAddress(url, opts.cookie);
+    if (direct) return direct;
+  }
 
   const notes: string[] = [];
   const captured: Captured[] = [];
@@ -309,18 +192,20 @@ export async function scan(
 
   try {
     say("Starting a browser");
-    browser = await launch();
+    try {
+      browser = await launch();
+    } catch (e) {
+      console.error("[scan] browser launch failed:", e);
+      return await scanWithoutBrowser(url, opts.cookie, say);
+    }
     const page = await openPage(browser, url, opts.cookie);
-
-    const pendingResponses = new Set<Promise<void>>();
+    const pending = new Set<Promise<void>>();
 
     page.on("response", (res: HTTPResponse) => {
       if (captured.length >= MAX_CAPTURES || res.status() >= 400) return;
-      const type = (res.headers()["content-type"] || "").toLowerCase();
-      if (!type.includes("json")) return;
+      if (!(res.headers()["content-type"] || "").toLowerCase().includes("json")) return;
       const req = res.request();
       if (!["xhr", "fetch", "other"].includes(req.resourceType())) return;
-
       const p = (async () => {
         try {
           const payload = await res.json();
@@ -329,8 +214,8 @@ export async function scan(
           /* unreadable body: not a data source */
         }
       })();
-      pendingResponses.add(p);
-      p.finally(() => pendingResponses.delete(p));
+      pending.add(p);
+      void p.finally(() => pending.delete(p));
     });
 
     say("Opening the page");
@@ -341,33 +226,57 @@ export async function scan(
       if (!page.url() || page.url() === "about:blank") throw new Error(`Couldn't open that page (${e instanceof Error ? e.message.split("\n")[0] : e}).`);
     }
 
-    say("Waiting for the content to appear");
-    await page.waitForResponse((res) => {
-      const type = (res.headers()["content-type"] || "").toLowerCase();
-      const u = res.url();
-      return type.includes("json") && (u.includes("search") || u.includes("exhibitor") || u.includes("/api/") || u.includes("marketplace"));
-    }, { timeout: 12_000 }).catch(() => undefined);
-    await page.waitForNetworkIdle({ idleTime: 1000, timeout: 10_000 }).catch(() => undefined);
-    await nudge(page, 3);
-    await page.waitForNetworkIdle({ idleTime: 800, timeout: 8_000 }).catch(() => undefined);
+    // Some single-page apps (Frankfurter Buchmesse among them) only fetch their
+    // data on some visits and otherwise render an empty shell. When a visit
+    // comes back empty, reload, up to twice.
+    let listCount = 0;
+    const started = Date.now();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // Stay well inside the function's time limit, whatever the site does.
+      if (attempt > 0 && Date.now() - started > 55_000) break;
+      if (attempt > 0) {
+        say("The page didn't load its content; trying again");
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 35_000 }).catch(() => undefined);
+      } else {
+        say("Waiting for the content to appear");
+      }
+      await page.waitForResponse((r) => (r.headers()["content-type"] || "").includes("json"), { timeout: 8_000 }).catch(() => undefined);
+      await page.waitForNetworkIdle({ idleTime: 900, timeout: 9_000 }).catch(() => undefined);
+      await nudge(page, 3);
+      await page.waitForNetworkIdle({ idleTime: 700, timeout: 6_000 }).catch(() => undefined);
+      // Some responses never finish (long polling, streams): don't wait on them forever.
+      await within(Promise.allSettled([...pending]), 5_000, []);
+
+      await within(page.addScriptTag({ content: extractorJs() }).then(() => undefined), 5_000, undefined);
+      const shape = await within(page.evaluate(
+        "(() => { const l = window.__ss ? window.__ss.detect() : []; return { lists: l.length, rich: l.some((x) => x.count >= 5 && x.columns.length >= 2), text: document.body.innerText.length }; })()",
+      ) as Promise<{ lists: number; rich: boolean; text: number }>, 10_000, { lists: 0, rich: false, text: 0 });
+      listCount = shape.lists;
+      // Small lookup lists (countries, halls, filter options) load even when the
+      // main data doesn't; only a paginated or wide record set counts as the data.
+      const feedFound = captured.some((c) => {
+        let body: unknown = null;
+        try { body = c.postData ? JSON.parse(c.postData) : null; } catch { body = null; }
+        const paged = !!detectPagination(c.url, body);
+        return findRecordSets(c.payload).some((set) => set.records.length >= 3 && (paged || Object.keys(set.records[0] ?? {}).length >= 6));
+      });
+      // An app shell still has menus that look like lists, but almost no text.
+      if (feedFound || (shape.rich && shape.text > 1200) || shape.text > 2500) break;
+    }
 
     say("Reading what the page shows");
-    const title = await page.title().catch(() => "");
+    const title = await within(page.title(), 5_000, "");
     const finalUrl = page.url();
-    const snap = await captureSnapshot(page, extractorJs());
-    const cookies = await browser.cookies().catch(() => [] as Array<{ name: string; value: string; domain: string }>);
-
-    // Ensure all response payloads have finished resolving
-    if (pendingResponses.size > 0) {
-      await Promise.allSettled([...pendingResponses]);
-    }
+    const pageText = aiEnabled() ? await within(page.evaluate("document.body.innerText") as Promise<string>, 5_000, "") : "";
+    const snap = await within(captureSnapshot(page, extractorJs()), 20_000, null);
+    if (!snap) throw new Error("The page took too long to freeze into a snapshot. Try again.");
+    const cookies = await within(browser.cookies(), 5_000, [] as Array<{ name: string; value: string; domain: string }>);
 
     say("Matching it to the site's own data");
     const apis: ApiSource[] = [];
     const seen = new Set<string>();
-    // Infinite scroll and "load more" fetch page 1, 2, 3 of the same endpoint.
-    // Those are one dataset: fold later pages into the first so the page's 30
-    // visible rows can match a feed that returns 10 at a time.
+    // Infinite scroll and "load more" fetch page 1, 2, 3 of the same endpoint:
+    // one dataset. Fold later pages into the first.
     const byEndpoint = new Map<string, ApiSource>();
     let n = 0;
     for (const cap of captured) {
@@ -380,27 +289,17 @@ export async function scan(
         }
       }
       for (const set of findRecordSets(cap.payload)) {
-        let rows = set.records.slice(0, SAMPLE_ROWS).map((r) => flatten(r));
+        const rows = set.records.slice(0, SAMPLE_ROWS).map((r) => flatten(r));
         if (rows.length < 2) continue;
         const signature = `${Object.keys(rows[0]).slice(0, 20).sort().join(",")}|${rows.length}|${JSON.stringify(rows[0]).slice(0, 200)}`;
         if (seen.has(signature)) continue;
         seen.add(signature);
-
-        if (cap.url.includes("search/exhibitors")) {
-          try {
-            const topEnriched = await enrichRowsWithTeam(rows.slice(0, 6), { concurrency: 6 });
-            rows.splice(0, 6, ...topEnriched);
-          } catch {
-            // best-effort preview enrichment
-          }
-        }
-
         const pagination = detectPagination(cap.url, body);
-        const endpointKey = datasetKey(cap.method, cap.url, body, set.path, pagination);
-        const sibling = pagination ? byEndpoint.get(endpointKey) : undefined;
+        const key = datasetKey(cap.method, cap.url, body, set.path, pagination);
+        const sibling = pagination ? byEndpoint.get(key) : undefined;
         if (sibling) {
           sibling.rows.push(...rows.slice(0, Math.max(0, SAMPLE_ROWS * 3 - sibling.rows.length)));
-          sibling.fields = sortFields(profile(sibling.rows));
+          sibling.fields = profile(sibling.rows);
           continue;
         }
         const headers = { ...cap.headers };
@@ -408,56 +307,29 @@ export async function scan(
         if (jar) headers.cookie = jar;
         const replay: Replay = { url: cap.url, method: cap.method, headers, body, jsonPath: set.path, pagination };
         const u = new URL(cap.url);
-
-        let fields = profile(rows);
-        if (cap.url.includes("search/exhibitors")) {
-          if (!fields.some((f) => f.key === "person_name")) {
-            fields.unshift({
-              key: "person_name",
-              label: "Representative Name",
-              sample: "Paweł Kopijer",
-              fill: 0.8,
-              plumbing: false,
-            });
-          }
-          if (!fields.some((f) => f.key === "designation")) {
-            fields.unshift({
-              key: "designation",
-              label: "Designation",
-              sample: "Author / IP Owner",
-              fill: 0.8,
-              plumbing: false,
-            });
-          }
-        }
-        fields = sortFields(fields);
-
         const source: ApiSource = {
-          id: `api${++n}`,
-          token: seal(replay),
-          endpoint: `${cap.method} ${u.host}${u.pathname}`,
-          jsonPath: set.path,
-          rows,
-          total: findTotal(cap.payload),
-          paginated: !!pagination,
-          fields,
+          id: `api${++n}`, token: seal(replay), endpoint: `${cap.method} ${u.host}${u.pathname}`, jsonPath: set.path,
+          rows, total: findTotal(cap.payload), paginated: !!pagination, fields: profile(rows),
         };
         apis.push(source);
-        if (pagination) byEndpoint.set(endpointKey, source);
+        if (pagination) byEndpoint.set(key, source);
       }
     }
 
-    if (!apis.length) notes.push("No data feed found behind this page, so results come from what's on screen. Page-by-page capture is still available.");
-    return { url, finalUrl, title, snapshot: snap.html, snapshotBytes: snap.bytes, apis, notes };
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("No Chrome found") || msg.includes("Failed to launch") || msg.includes("timeout") || msg.includes("137")) {
-      throw new Error(
-        `Headless browser could not read this page (${msg}). ` +
-        `Tip: For catalog and directory sites, you can enter the direct API endpoint to extract data with zero timeouts.`
-      );
+    await polishNames(title, apis);
+
+    const usefulFeed = apis.some((a) => a.rows.length >= 3 && a.fields.filter((f) => !f.plumbing && f.fill > 0.3).length >= 2);
+    if (!listCount && !usefulFeed && aiEnabled()) {
+      say("Reading the page text with AI");
+      const records = await extractRecords(title, pageText);
+      if (records) apis.push(aiSource(records));
     }
-    throw err;
+    if (!apis.length && !listCount) {
+      notes.push(aiEnabled()
+        ? "No list or data was found on this page. Click the things you want on the page to capture them."
+        : "No list or data was found on this page. Click the things you want on the page to capture them, or add a Groq key to let AI read the page.");
+    }
+    return { url, finalUrl, title, snapshot: snap.html, snapshotBytes: snap.bytes, apis, notes };
   } finally {
     await browser?.close().catch(() => undefined);
   }

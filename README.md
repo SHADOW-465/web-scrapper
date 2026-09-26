@@ -1,12 +1,17 @@
 # Scrape Studio
 
-Paste a link. Mark what you want on the page. Take all of it.
+Paste a link. See everything that can be extracted. Tick what you want. Get
+all of it as Excel or PDF (or CSV, JSON).
 
-Scrape Studio opens a page in a real browser, finds the lists on it, and shows
-you the page with those lists already highlighted. Each column is an ink: click
-anything on the page to add it, click it again to take it off, rename it in the
-tray. Then export every page, not just the one on screen, to Excel, CSV, JSON,
-or PDF.
+Scrape Studio opens the page in a real browser and lists what it can take:
+every list on the page, the site's own data behind it (often thousands of rows
+where the page shows 36), and what's on each item's own page: people with
+their designations, websites, emails, social links, descriptions. Tick fields,
+rename them, and export. Big exports run as resumable jobs.
+
+Measured on the Frankfurter Buchmesse exhibitor directory: all 4,043
+exhibitors plus every exhibitor's own page (team members, designations) in
+about 10 minutes, 4,742 rows, 1,423 named people, zero failed pages.
 
 ```bash
 npm install
@@ -41,13 +46,20 @@ columns on each page.
 app/
   page.tsx, layout.tsx, globals.css    the interface
   api/scan/route.ts                    load a page, snapshot it, record its data feeds
-  api/fetch/route.ts                   replay a feed page by page
+  api/fetch/route.ts                   replay a feed page by page (short, resumable steps)
+  api/items/sample/route.ts            find item pages, sample them, list their fields
+  api/items/read/route.ts              read many item pages (fast path: no browser)
   api/crawl/route.ts                   page-by-page capture when there is no feed
   api/access/route.ts                  optional password gate
 components/                            Studio, Sheet (snapshot), Tray, Preview, ...
 lib/
   extractor.js       in-page engine: list detection, column naming, picker, crawling
-  scan.ts            browser session: snapshot + captured feeds
+  scan.ts            browser session: snapshot + captured feeds (+ reload on empty shells)
+  items.ts           item pages: address discovery, sampling, fast reading
+  items-client.ts    item pages, browser side: row addresses, joining, one row per person
+  job.ts             resumable export jobs (IndexedDB), retries, progress
+  ai.ts              optional Groq helpers: field names, reading unstructured pages
+  safe-fetch.ts      every server request, redirect hops included, stays public
   correlate.ts       match what's on screen to a data feed
   records.ts         JSON record finding, flattening, pagination detection
   replay.ts          replay a feed across pages

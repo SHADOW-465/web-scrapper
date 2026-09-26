@@ -4,7 +4,7 @@ import { scan } from "@/lib/scan";
 import { assertPublicUrl, BlockedUrlError } from "@/lib/ssrf";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300; // slow sites plus up to two reloads
 
 /** POST { url, cookie? } -> NDJSON: status events, then one `result`. */
 export async function POST(req: Request) {

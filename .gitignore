@@ -4,7 +4,7 @@ node_modules/
 .pnp.js
 
 # Testing & Legacy scripts/apps
-tests/
+
 legacy/
 data/
 exports/

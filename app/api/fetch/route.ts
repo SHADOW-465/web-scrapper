@@ -1,24 +1,23 @@
 import { denied, hasAccess } from "@/lib/access";
 import { ndjson } from "@/lib/ndjson";
-import { replayPages, type Replay } from "@/lib/replay";
+import { PageError, replayPages, type Replay } from "@/lib/replay";
 import { open, TokenError } from "@/lib/token";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 /**
- * POST { token, startIndex?, maxRows? } -> NDJSON `rows` batches, then
- * `done` or `continue` (with nextIndex) when the time budget runs out.
- * The client chains `continue` calls, so no dataset is too big for one function.
+ * POST { token, startIndex?, maxRows? } -> NDJSON `rows` batches, then one of:
+ *   `done`                      every page fetched
+ *   `continue` { nextIndex }    time slice used up; call again from nextIndex
+ *   `error` { message, nextIndex }  a page failed after retries; retry from nextIndex
+ *
+ * Each call works for about 25 seconds. Short calls are what make big
+ * extractions reliable: a dropped connection costs one slice, not the run.
  */
 export async function POST(req: Request) {
   if (!hasAccess(req)) return denied();
-  const body = (await req.json().catch(() => ({}))) as {
-    token?: string;
-    startIndex?: number;
-    maxRows?: number;
-    enrichTeam?: boolean;
-  };
+  const body = (await req.json().catch(() => ({}))) as { token?: string; startIndex?: number; maxRows?: number };
   let replay: Replay;
   try {
     replay = open<Replay>(String(body.token ?? ""));
@@ -27,14 +26,18 @@ export async function POST(req: Request) {
   }
   const startIndex = Math.max(0, Math.floor(Number(body.startIndex) || 0));
   const maxRows = body.maxRows && body.maxRows > 0 ? Math.floor(body.maxRows) : undefined;
-  const enrichTeam = !!body.enrichTeam;
 
   return ndjson(async (emit) => {
-    const deadline = Date.now() + (maxDuration - 45) * 1000;
+    const deadline = Date.now() + 25_000;
     let last = { done: false, nextIndex: startIndex };
-    for await (const page of replayPages(replay, { startIndex, maxRows, deadline, enrichTeam })) {
-      emit({ type: "rows", rows: page.rows, total: page.total });
-      last = page;
+    try {
+      for await (const page of replayPages(replay, { startIndex, maxRows, deadline })) {
+        emit({ type: "rows", rows: page.rows, total: page.total, nextIndex: page.nextIndex });
+        last = page;
+      }
+    } catch (e) {
+      emit({ type: "error", message: e instanceof Error ? e.message : String(e), nextIndex: e instanceof PageError ? e.index : last.nextIndex });
+      return;
     }
     emit(last.done ? { type: "done" } : { type: "continue", nextIndex: last.nextIndex });
   });

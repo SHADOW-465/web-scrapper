@@ -13,6 +13,7 @@ file.
    |---|---|---|
    | `SCRAPE_SECRET` | yes, in production | a long random string, e.g. `openssl rand -base64 32` |
    | `APP_PASSWORD` | strongly recommended | the password people must enter to use it |
+   | `GROQ_API_KEY` | optional | free key from console.groq.com: cleaner field names, AI reading of unstructured pages |
 
    Without `SCRAPE_SECRET` the production app refuses to issue feed tokens,
    rather than using a guessable key.
@@ -23,9 +24,11 @@ file.
 
 | Route | Max duration | Work |
 |---|---|---|
-| `/api/scan` | 120 s | launches Chromium, loads the page, snapshots it |
+| `/api/scan` | 300 s | launches Chromium, loads the page (reloading empty shells), snapshots it |
+| `/api/items/sample` | 300 s | finds item pages, lays out samples in Chromium |
+| `/api/items/read` | 90 s | reads a batch of item pages over plain HTTP |
 | `/api/crawl` | 300 s | launches Chromium, follows Next / scrolls |
-| `/api/fetch` | 300 s | plain HTTP replay, no browser |
+| `/api/fetch` | 60 s | plain HTTP replay, ~25 s of pages per call |
 | `/api/access` | default | password check |
 
 Chromium comes from `@sparticuz/chromium`, the build sized for serverless

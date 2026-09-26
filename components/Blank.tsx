@@ -41,6 +41,7 @@ export function Welcome({ onTry }: { onTry: (url: string) => void }) {
 }
 
 const STEPS = ["Starting a browser", "Opening the page", "Waiting for the content to appear", "Reading what the page shows", "Matching it to the site's own data"];
+const OTHER = ["The page didn't load its content; trying again", "Reading the data address directly", "Reading the page without a browser", "Reading the page text with AI"];
 
 export function Printing({ host, status }: { host: string; status: string[] }) {
   const current = status[status.length - 1];
@@ -56,6 +57,12 @@ export function Printing({ host, status }: { host: string; status: string[] }) {
               <span>{s}</span>
             </li>
           ))}
+          {OTHER.includes(current) && (
+            <li className="now">
+              <Loader2 size={16} className="spin" style={{ animation: "spin .9s linear infinite" }} aria-hidden="true" />
+              <span>{current}</span>
+            </li>
+          )}
         </ol>
         <div className="skeleton" aria-hidden="true">
           <i style={{ width: "92%" }} /><i style={{ width: "78%" }} /><i style={{ width: "85%" }} /><i style={{ width: "60%" }} />
@@ -65,104 +72,22 @@ export function Printing({ host, status }: { host: string; status: string[] }) {
   );
 }
 
-export function Failed({
-  message,
-  initialUrl,
-  onRetry,
-  onBack,
-  onScanUrl,
-}: {
-  message: string;
-  initialUrl?: string;
-  onRetry: () => void;
-  onBack: () => void;
-  onScanUrl?: (url: string) => void;
-}) {
-  const isBuchmesse = initialUrl?.includes("buchmesse.de");
-  const suggestedApi = isBuchmesse
-    ? "https://event.buchmesse.de/api/v1/search/exhibitors"
-    : initialUrl?.includes("/api/")
-    ? initialUrl
-    : "";
-  const [customUrl, setCustomUrl] = useState(suggestedApi || initialUrl || "");
-
-  const isServerlessTimeout =
-    message.includes("500") ||
-    message.includes("timed out") ||
-    message.includes("timeout") ||
-    message.includes("memory") ||
-    message.includes("browser");
-
+export function Failed({ message, onRetry, onBack }: { message: string; onRetry: () => void; onBack: () => void }) {
   return (
     <div className="blank">
       <article className="page-paper">
         <div className="errbox" role="alert">
-          <b style={{ display: "block", marginBottom: 4 }}>That page couldn&rsquo;t be read.</b>
-          <span>{message}</span>
+          <b>That page couldn&rsquo;t be read.</b>
+          {message}
         </div>
-
-        {isServerlessTimeout && (
-          <div
-            style={{
-              marginTop: 14,
-              padding: "12px 14px",
-              background: "var(--paper-subtle, #f8fafc)",
-              border: "1px solid var(--border, #e2e8f0)",
-              borderRadius: 6,
-              fontSize: 13,
-            }}
-          >
-            <p style={{ margin: "0 0 6px 0", fontWeight: 600, color: "var(--fg, #1e293b)" }}>
-              Why did this happen?
-            </p>
-            <ul style={{ margin: 0, paddingLeft: 18, color: "var(--muted, #475569)", lineHeight: 1.5 }}>
-              <li>
-                <strong>Vercel Timeout (10s):</strong> Heavy SPA sites take 15–20s for headless Chrome to render, exceeding serverless limits.
-              </li>
-              <li>
-                <strong>Fast-Path Direct API:</strong> You can scrape directories directly using their JSON catalog endpoint with zero browser overhead.
-              </li>
-              <li>
-                <strong>Local Port Conflict:</strong> If running locally, another app may be occupying port 3000 (try <code>http://localhost:3001</code>).
-              </li>
-            </ul>
-          </div>
-        )}
-
-        {onScanUrl && (
-          <div style={{ marginTop: 16 }}>
-            <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "var(--fg, #334155)", marginBottom: 6 }}>
-              Bypass browser with direct catalog API endpoint:
-            </label>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
-                type="text"
-                className="input"
-                style={{ flex: 1, padding: "7px 10px", fontSize: 13 }}
-                value={customUrl}
-                onChange={(e) => setCustomUrl(e.target.value)}
-                placeholder="https://event.buchmesse.de/api/v1/search/exhibitors"
-              />
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => {
-                  if (customUrl.trim()) onScanUrl(customUrl.trim());
-                }}
-              >
-                Scan Direct API
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
-          <button className="btn btn-primary" onClick={onRetry}>
-            Try again
-          </button>
-          <button className="btn btn-quiet" onClick={onBack}>
-            Start over
-          </button>
+        <p style={{ marginTop: 16 }}>
+          Some sites block automated browsers or only show their content after you sign in. If the page opens in your
+          own browser, try again, or use <b>Signed-in page</b> with your cookie. If the site offers a data address
+          (one that returns JSON), you can paste that instead.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-primary" onClick={onRetry}>Try again</button>
+          <button className="btn btn-quiet" onClick={onBack}>Start over</button>
         </div>
       </article>
     </div>

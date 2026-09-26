@@ -20,6 +20,8 @@ export interface Recipe {
   scope: "page" | "feed" | "crawl";
   crawl?: { mode: "next" | "more" | "scroll"; maxPages: number };
   format: Format;
+  /** Item-page fields to switch on once the sample item page has been read. */
+  itemColumns?: Array<{ key: string; name: string }>;
 }
 
 const KEY = "scrape-studio.recipes.v1";

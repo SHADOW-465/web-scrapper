@@ -115,7 +115,10 @@ export async function openPage(browser: Browser, url: string, cookie?: string): 
 
 let extractorSource: string | null = null;
 export function extractorJs(): string {
-  if (!extractorSource) extractorSource = readFileSync(path.join(process.cwd(), "lib", "extractor.js"), "utf8");
+  // Cached in production; re-read in development so engine edits take effect without a restart.
+  if (!extractorSource || process.env.NODE_ENV !== "production") {
+    extractorSource = readFileSync(path.join(process.cwd(), "lib", "extractor.js"), "utf8");
+  }
   return extractorSource;
 }
 

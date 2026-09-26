@@ -13,7 +13,7 @@ export interface PageList { id: string; name: string; count: number; itemSelecto
 export interface FeedField { key: string; label: string; sample: string; fill: number; plumbing: boolean }
 export interface Feed {
   id: string; token: string; endpoint: string; jsonPath: string;
-  rows: Array<Record<string, unknown>>; total: number | null; paginated: boolean; fields: FeedField[];
+  rows: Array<Record<string, unknown>>; total: number | null; paginated: boolean; fields: FeedField[]; ai?: boolean;
 }
 
 export interface Column {
@@ -25,7 +25,32 @@ export interface Column {
   page?: { key: string; sel: string; attr: string; multi?: boolean };
   /** The matching field in the site's data feed, if one was found. */
   feedKey?: string;
+  /** Read from each item's own page (see lib/items.ts). */
+  item?: { key: string; sel: string; attr: string; multi?: boolean; listId?: string };
   sample: string;
+}
+
+/** Where each row's own page is. */
+export interface ItemSource {
+  columnKey?: string; // a link column on the page list
+  key?: string;       // a field in the feed ...
+  pattern?: string;   // ... placed into this address ("{v}" alone: the field is the address)
+}
+
+export interface ItemCatalogueList { id: string; name: string; itemSelector: string; count: number; people?: boolean }
+export interface ItemCatalogueField {
+  key: string; sel: string; attr: string; multi?: boolean; listId?: string;
+  name: string; sample: string; staticOK: boolean; suggested: boolean;
+}
+export interface ItemCatalogue {
+  sampleUrl: string; title: string; lists: ItemCatalogueList[]; fields: ItemCatalogueField[]; mode: "static" | "browser";
+}
+
+export interface ItemsInfo {
+  status: "looking" | "ready" | "none" | "error";
+  message?: string;
+  source?: ItemSource;
+  catalogue?: ItemCatalogue;
 }
 
 export interface Workspace {
@@ -33,6 +58,7 @@ export interface Workspace {
   columns: Column[];
   match: Match | null;
   feedId: string | null;
+  items?: ItemsInfo;
 }
 
 const GENERIC = /^(text|title|link|image|number)( \d+)?$/i;
@@ -41,11 +67,12 @@ const GENERIC = /^(text|title|link|image|number)( \d+)?$/i;
 function bestName(pageName: string | undefined, feedKey: string | undefined): string {
   const fromFeed = feedKey ? humanizeKey(feedKey) : "";
   if (!pageName) return fromFeed || "Column";
-  if (fromFeed && GENERIC.test(pageName)) return fromFeed;
+  // "Company 2" is the page's guess repeated; the site's own field name ("Country") knows better.
+  if (fromFeed && (GENERIC.test(pageName) || /\s\d+$/.test(pageName))) return fromFeed;
   return pageName;
 }
 
-function uniqueNames(cols: Column[]) {
+export function uniqueNames(cols: Column[]) {
   const seen = new Map<string, number>();
   for (const c of cols) {
     const n = seen.get(c.name.toLowerCase()) ?? 0;
@@ -91,31 +118,10 @@ export function openWorkspace(list: PageList, feeds: Feed[]): Workspace {
 
 /** A dataset that exists only in a feed (nothing on screen matched it). */
 export function openFeedWorkspace(feed: Feed): Workspace {
-  const priorityKeys = [
-    "name", "company", "person_name", "representative", "designation", "position", "role",
-    "stands.0.hall", "hall", "stands.0.stand", "stand", "country", "url", "profile_url",
-    "description", "about"
-  ];
   const fields = feed.fields.filter((f) => !f.plumbing && f.fill > 0.2);
-  fields.sort((a, b) => {
-    const ai = priorityKeys.indexOf(a.key.toLowerCase());
-    const bi = priorityKeys.indexOf(b.key.toLowerCase());
-    if (ai !== -1 && bi !== -1) return ai - bi;
-    if (ai !== -1) return -1;
-    if (bi !== -1) return 1;
-    return 0;
-  });
-  const cols: Column[] = fields.map((f, i) => {
-    const isPriority = priorityKeys.includes(f.key.toLowerCase());
-    return {
-      id: `f-${f.key}`,
-      name: f.label,
-      ink: INKS[i % INKS.length],
-      on: isPriority ? i < 8 : i < 6,
-      feedKey: f.key,
-      sample: f.sample,
-    };
-  });
+  const cols: Column[] = fields.map((f, i) => ({
+    id: `f-${f.key}`, name: f.label, ink: INKS[i % INKS.length], on: i < 8, feedKey: f.key, sample: f.sample,
+  }));
   uniqueNames(cols);
   return { listId: `feed:${feed.id}`, columns: cols, match: null, feedId: feed.id };
 }
@@ -154,11 +160,21 @@ export function extraFields(ws: Workspace, feed: Feed | undefined): FeedField[] 
 
 export type Row = Record<string, unknown>;
 
+/** Feed values sometimes carry HTML ("<p><strong>11x17</strong> is…"); a spreadsheet wants the words. */
+export function plain(v: unknown): unknown {
+  if (typeof v !== "string" || !/<[a-z/][^>]*>/i.test(v)) return v;
+  return v
+    .replace(/<(br|\/p|\/div|\/li|\/h\d)[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
+}
+
 /** Rows for what is on screen right now. */
 export function pageRows(ws: Workspace, list: PageList | undefined, feed: Feed | undefined): Row[] {
   const on = ws.columns.filter((c) => c.on);
   if (!list) {
-    return (feed?.rows ?? []).map((r) => Object.fromEntries(on.map((c) => [c.name, c.feedKey ? r[c.feedKey] ?? "" : ""])));
+    return (feed?.rows ?? []).map((r) => Object.fromEntries(on.map((c) => [c.name, c.feedKey ? plain(r[c.feedKey]) ?? "" : ""])));
   }
   const byKey = new Map(list.columns.map((c) => [c.key, c.values]));
   // feed row index -> page row index, so feed-only columns can fill on-screen rows
@@ -169,10 +185,19 @@ export function pageRows(ws: Workspace, list: PageList | undefined, feed: Feed |
     const fr = feedRowFor.get(i);
     rows.push(Object.fromEntries(on.map((c) => {
       if (c.page) return [c.name, byKey.get(c.page.key)?.[i] ?? ""];
-      return [c.name, fr != null && c.feedKey ? feed!.rows[fr][c.feedKey] ?? "" : ""];
+      return [c.name, fr != null && c.feedKey ? plain(feed!.rows[fr][c.feedKey]) ?? "" : ""];
     })));
   }
   return rows;
+}
+
+/**
+ * An ad slot or placeholder inside a list has nothing in any chosen page
+ * column. Filter after pairing rows with anything matched by position.
+ */
+export function hasPageContent(ws: Workspace): (r: Row) => boolean {
+  const pageCols = ws.columns.filter((c) => c.on && c.page);
+  return (r) => !pageCols.length || pageCols.some((c) => r[c.name] !== "" && r[c.name] != null);
 }
 
 /**
@@ -191,7 +216,7 @@ export function feedRows(ws: Workspace, list: PageList | undefined, fetched: Row
   return fetched.map((r) => {
     const pi = anchor ? pageIndex.get(norm(r[anchor.apiKey])) : undefined;
     return Object.fromEntries(on.map((c) => {
-      if (c.feedKey) return [c.name, r[c.feedKey] ?? ""];
+      if (c.feedKey) return [c.name, plain(r[c.feedKey]) ?? ""];
       if (c.page && pi != null) return [c.name, byKey.get(c.page.key)?.[pi] ?? ""];
       return [c.name, ""];
     }));
@@ -205,7 +230,6 @@ export function pageOnly(ws: Workspace): Column[] {
 
 /** What a feed dataset should be called when nothing on screen names it. */
 export function feedTitle(feed: Feed): string {
-  if (feed.endpoint.includes("search/exhibitors")) return "Frankfurt Buchmesse Exhibitors";
   const segs = [...feed.jsonPath.split("."), ...feed.endpoint.split(/[\s/]/)].filter((s) => s && !/^\d+$/.test(s) && !/^(data|list|items|results|api|v\d+|get|post|search|output|records|rows)$/i.test(s) && !s.includes("."));
   const last = segs[segs.length - 1] ?? "data";
   return humanizeKey(last);
@@ -228,6 +252,7 @@ export function selfCheck(): string {
   const ws = openWorkspace(list, [feed]);
   if (ws.feedId !== "api1") throw new Error("feed not matched");
   const text = ws.columns.find((c) => c.page?.key === "span.text@own")!;
+  if (bestName("Company 2", "country") !== "Country") throw new Error("numbered page name should yield to feed name");
   if (text.name !== "Text" || text.feedKey !== "text") throw new Error(`text column wrong: ${text.name}/${text.feedKey}`);
   const withTags = addFeedColumn(ws, feed.fields[0]);
   const rows = feedRows(withTags, list, feed.rows);

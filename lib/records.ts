@@ -123,16 +123,13 @@ export function detectPagination(url: string, body: Json): Pagination | null {
  * `stands.0.hall` -> "Hall", `company_name` -> "Company name", `isNew` -> "Is new".
  */
 export function humanizeKey(path: string): string {
-  if (path === "name" || path === "company") return "Company Name";
-  if (path === "person_name" || path === "representative") return "Representative Name";
-  if (path === "designation" || path === "job_title" || path === "role") return "Designation";
-  if (path === "stands.0.hall" || path === "hall") return "Hall";
-  if (path === "stands.0.stand" || path === "stand") return "Stand";
-  if (path === "country") return "Country";
-  if (path === "about" || path === "description") return "Description";
-  if (path === "url" || path === "profile_url") return "Profile URL";
   const parts = path.split(".").filter((p) => !/^\d+$/.test(p));
-  const leaf = parts[parts.length - 1] ?? path;
+  let leaf = parts[parts.length - 1] ?? path;
+  // "stands.0.name" is a stand's name, not the row's name.
+  if (parts.length > 1 && /^(name|value|title|label|text|type|code|id)$/i.test(leaf)) {
+    const parent = parts[parts.length - 2].replace(/ies$/i, "y").replace(/([^s])s$/i, "$1");
+    leaf = `${parent}_${leaf}`;
+  }
   const words = leaf
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[_\-]+/g, " ")
@@ -144,7 +141,7 @@ export function humanizeKey(path: string): string {
 /** Fields that are plumbing, not information a person reads. */
 export function isPlumbing(path: string, sample: unknown): boolean {
   const leaf = path.split(".").pop()!.toLowerCase();
-  if (/(^|_)(id|uuid|guid|hash|key|token|order_num|sort|index|position)$/.test(leaf) || /Id$/.test(path.split(".").pop()!)) return true;
+  if (/(^|_)(id|uuid|guid|hash|key|token|order_num|sort|index)$/.test(leaf) || /Id$/.test(path.split(".").pop()!)) return true;
   if (/^(is|has|show|can)[A-Z_]/.test(path.split(".").pop()!)) return true;
   if (/(_count|\.count)$/.test(path)) return true;
   if (typeof sample === "boolean") return true;
@@ -173,6 +170,8 @@ export function selfCheck(): string {
   const q = detectPagination("https://x.test/a?pageNumber=2&limit=36", null);
   if (!q || q.style !== "query_page" || q.first !== 2) throw new Error("query pagination failed");
   if (humanizeKey("stands.0.hall") !== "Hall") throw new Error("humanize failed");
+  if (humanizeKey("stands.0.stands.0.name") !== "Stand name") throw new Error(`humanize nested failed: ${humanizeKey("stands.0.stands.0.name")}`);
+  if (humanizeKey("name") !== "Name") throw new Error("humanize top-level failed");
   if (humanizeKey("company_name") !== "Company name") throw new Error("humanize snake failed");
   if (!isPlumbing("category_id", 531) || isPlumbing("country", "UK")) throw new Error("plumbing check failed");
   return "records ok";

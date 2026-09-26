@@ -16,6 +16,10 @@ development key locally (with a console warning).
 ```bash
 npm test          # offline: records, ssrf, token, replay, correlate, exporters, model
 npm run test:live # online: scan quotes.toscrape.com/scroll, detect, match, replay
+APP_URL=http://localhost:3000 npx tsx tests/e2e.ts <url> [rows]
+                  # through the HTTP API: scan, item pages, rows, people, CSV
+APP_URL=http://localhost:3000 npx tsx tests/ui-flow.ts <url> xlsx people
+                  # drives the real UI, ticks team fields, exports, checks the file
 npm run test:live -- https://example.com/some/list
 npx tsx tests/shots.ts [url]   # with `npm run dev` running: drives the UI,
                                # clicks in the snapshot, exports every page, checks
@@ -60,6 +64,9 @@ App to snapshot (`source: "scrape-studio-host"`):
 JSON feed), `/js` (script-rendered), and `books.toscrape.com` are built for
 scraper testing and make good fixtures.
 
-The Frankfurter Buchmesse exhibitor directory, the project's original target,
-currently renders no listings in any browser (checked 22 Sep 2026), though its
-API still answers. Re-test against it when the fair's directory is live.
+The Frankfurter Buchmesse directory loads its data on only about half of
+visits; use the English address (`/en/marketplace/exhibitors`). The scan
+reloads empty loads by itself.
+
+In development the engine file is re-read on every use, so edits apply without
+a restart. In production it is cached.

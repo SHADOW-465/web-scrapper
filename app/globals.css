@@ -527,3 +527,26 @@ table.grid td.empty { color: var(--rule-strong); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
+
+/* ------------------------------------------------------------ exports in progress */
+
+.jobbanner { margin: 12px 18px 0; border: 1px solid var(--graphite); border-radius: var(--r-2); background: var(--chrome); overflow: hidden; }
+.blank-wrap { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.blank-wrap .jobbanner { width: min(720px, calc(100% - 44px)); margin: 24px auto 0; background: var(--paper); }
+.blank-wrap .blank { height: auto; }
+.jobrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px; }
+.jobrow + .jobrow { border-top: 1px solid var(--rule); }
+.jobrow b { display: block; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobrow span { display: block; font-size: 12.5px; color: var(--graphite-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pastebox .exportrow { margin-top: 8px; }
+.col.item .cap { border-radius: 10px; }
+.note a { color: var(--graphite); }
+.note .spin, .note svg.spin { animation: spin 0.9s linear infinite; }
+
+/* Long export labels ("Capture pages and export") wrap instead of pushing the tray wider. */
+.exportbar { min-width: 0; }
+.exportrow { flex-wrap: wrap; min-width: 0; }
+.exportrow .fname { flex: 1 1 140px; }
+.exportrow .btn-primary { flex: 1 1 auto; white-space: normal; text-align: center; min-height: 38px; height: auto; padding-top: 6px; padding-bottom: 6px; }
+/* Addresses read character by character: no "//" ligature. */
+.field input, .fname, .num { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
