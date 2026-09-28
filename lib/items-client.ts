@@ -148,7 +148,7 @@ export async function widerRows(
 /** What the server needs to find item pages itself. */
 export function discoveryRequest(scanUrl: string, feed: Feed, extra: Row[] = []) {
   // The first rows go first: they're the ones used to test address patterns.
-  const rows = [...feed.rows.slice(0, 2), ...spread([...feed.rows.slice(2), ...extra], 22)];
+  const rows = [...feed.rows.slice(0, 2), ...spread([...feed.rows.slice(2), ...extra], 40)];
   const slugFields = feed.fields.filter((f) => {
     const vals = feed.rows.slice(0, 20).map((r) => String(r[f.key] ?? ""));
     return vals.filter((v) => SLUGISH.test(v)).length >= vals.length * 0.8 && distinctShare(vals) >= 0.9 && !/^\d{1,3}$/.test(vals[0]);

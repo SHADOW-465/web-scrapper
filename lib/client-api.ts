@@ -4,6 +4,8 @@ import type { ItemResult, ItemSpec } from "./items-client";
 import type { Feed, ItemCatalogue, ItemSource, Row } from "./model";
 
 export class LockedError extends Error {}
+/** Item pages exist but were not worth reading (very large pages). */
+export class SkippedItemsError extends Error {}
 export class HttpError extends Error {
   constructor(message: string, public status: number) {
     super(message);
@@ -120,13 +122,16 @@ export async function sampleItems(
 ): Promise<{ pattern: ItemSource | null; catalogue: ItemCatalogue } | null> {
   const res = await post("/api/items/sample", body, signal);
   let out: { pattern: ItemSource | null; catalogue: ItemCatalogue } | null = null;
+  let reason: string | null = null;
   let error: string | null = null;
   await readNdjson(res, (e) => {
     if (e.type === "status") onStatus(String(e.text));
     else if (e.type === "result") out = { pattern: (e.pattern as ItemSource | null) ?? null, catalogue: e.catalogue as ItemCatalogue };
+    else if (e.type === "none" && e.message) reason = String(e.message);
     else if (e.type === "error") error = String(e.message);
   });
   if (error) throw new Error(error);
+  if (!out && reason) throw new SkippedItemsError(reason);
   return out;
 }
 

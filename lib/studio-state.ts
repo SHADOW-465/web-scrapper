@@ -79,28 +79,34 @@ export function reducer(s: State, a: Action): State {
 
       // A saved recipe names its feed; otherwise the biggest dataset (by what the site says it holds) leads.
       const richFeed = (a.prefer?.feedEndpoint ? s.feeds.find((f) => f.endpoint === a.prefer!.feedEndpoint) : undefined) ?? bestFeed(s.feeds);
-      const listMatchingRichFeed = richFeed ? lists.find((l) => {
-        const m = matchList(l, [richFeed]);
-        return m && m.pairs.length > 0;
-      }) : undefined;
 
       // Open whatever reaches the most rows. A list on the page reaches as far
-      // as the feed it matches; a feed on its own reaches its reported total.
+      // as the feed it matches, but only when the feed is a credible stand-in
+      // for that list: a 12-card sponsor strip sharing a few names with a
+      // 4,000-row directory does not reach 4,000 rows.
       const size = (f: Feed) => f.total ?? f.rows.length;
       const reach = (l: PageList) => {
         const m = matchList(l, s.feeds);
         const f = m ? s.feeds.find((x) => x.id === m.apiId) : undefined;
-        return f ? Math.max(size(f), l.count) : l.count;
+        if (!f) return l.count;
+        const covered = m!.pairs.length / Math.max(1, l.columns.filter((c) => c.fill >= 0.5).length);
+        const page = size(f) / Math.max(1, l.count);
+        return covered >= 0.5 && page <= 4 ? Math.max(size(f), l.count) : l.count;
       };
-      const bestList = [...lists].filter((l) => !l.manual).sort((x, y) => reach(y) - reach(x))[0];
+      // The main list is the one carrying the most information, not merely the
+      // most rows: a 50-link category sidebar is not the 20 books beside it.
+      // The engine's own score weighs rows, text, fields and area together.
+      const real = [...lists].filter((l) => !l.manual);
+      const richest = [...real].sort((x, y) => y.score - x.score)[0];
+      const furthest = [...real].sort((x, y) => reach(y) - reach(x))[0];
+      const bestList = richest && furthest && reach(furthest) >= 3 * reach(richest) ? furthest : richest;
       const open = (id: string, w: Workspace) => {
         ws[id] = a.prefer?.columns?.length ? applyRecipe(w, a.prefer.columns) : w;
         active = id;
       };
 
       if (pinned) open(pinned.id, openWorkspace(pinned, s.feeds));
-      else if (listMatchingRichFeed) open(listMatchingRichFeed.id, openWorkspace(listMatchingRichFeed, s.feeds));
-      // The page shows a slice of something much bigger that no on-screen list matched: open the data.
+      // The page shows a slice of something much bigger: open the data itself.
       else if (richFeed && (!bestList || size(richFeed) >= 3 * reach(bestList))) open(`feed:${richFeed.id}`, openFeedWorkspace(richFeed));
       else if (bestList) open(bestList.id, openWorkspace(bestList, s.feeds));
       else if (richFeed) open(`feed:${richFeed.id}`, openFeedWorkspace(richFeed));
@@ -114,10 +120,22 @@ export function reducer(s: State, a: Action): State {
       const cat = a.items.catalogue;
       if (cat && !w.columns.some((c) => c.item)) {
         const prefer = new Map((s.preferItems ?? []).map((p) => [p.key, p.name]));
+        const taken = new Set(columns.map((c) => c.name.toLowerCase()));
+        // A team list's "Name" beside the row's own "Name" would read as
+        // "Name 2"; say whose name it is instead ("Team member name").
+        const singular = (t: string) => t.trim().replace(/s$/i, "").toLowerCase();
         const added: Column[] = [];
         for (const f of cat.fields) {
+          let name = prefer.get(f.key) ?? f.name;
+          const list = f.listId ? cat.lists.find((l) => l.id === f.listId) : undefined;
+          if (!prefer.has(f.key) && list && taken.has(name.toLowerCase())) {
+            const lead = singular(list.name);
+            if (lead && lead.length < 24 && !name.toLowerCase().includes(lead)) {
+              name = `${lead.charAt(0).toUpperCase()}${lead.slice(1)} ${name.toLowerCase()}`;
+            }
+          }
           added.push({
-            id: `i-${f.key}`, name: prefer.get(f.key) ?? f.name, ink: nextInk([...columns, ...added]), on: prefer.has(f.key),
+            id: `i-${f.key}`, name, ink: nextInk([...columns, ...added]), on: prefer.has(f.key),
             item: { key: f.key, sel: f.sel, attr: f.attr, multi: f.multi, listId: f.listId }, sample: f.sample,
           });
         }

@@ -1,5 +1,5 @@
 import { denied, hasAccess } from "@/lib/access";
-import { discoverPattern, sampleItemPage } from "@/lib/items";
+import { discoverPattern, HeavyPagesError, sampleItemPage } from "@/lib/items";
 import { ndjson } from "@/lib/ndjson";
 import { assertPublicUrl } from "@/lib/ssrf";
 
@@ -42,20 +42,20 @@ export async function POST(req: Request) {
   };
 
   return ndjson(async (emit) => {
-    let urls = (body.urls ?? []).filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)).slice(0, 32);
+    let urls = (body.urls ?? []).filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)).slice(0, 48);
     let pattern: { key: string; pattern: string } | null = null;
     if (!urls.length && body.discover) {
       emit({ type: "status", text: "Looking for each item's own page" });
       pattern = await discoverPattern({
         origin: scan.origin,
         hintPaths: body.discover.hintPaths.slice(0, 6).map(String),
-        candidates: body.discover.candidates.slice(0, 6).map((c) => ({ key: String(c.key), values: c.values.slice(0, 32).map(String) })),
+        candidates: body.discover.candidates.slice(0, 6).map((c) => ({ key: String(c.key), values: c.values.slice(0, 48).map(String) })),
         verify: body.discover.verify.slice(0, 3).map(String),
         cookie,
       });
       if (pattern) {
         const c = body.discover.candidates.find((x) => x.key === pattern!.key)!;
-        urls = c.values.slice(0, 32).filter(Boolean).map((v) => pattern!.pattern.replace("{v}", encodeURIComponent(String(v))));
+        urls = c.values.slice(0, 48).filter(Boolean).map((v) => pattern!.pattern.replace("{v}", encodeURIComponent(String(v))));
       }
     }
     if (!urls.length) {
@@ -64,7 +64,12 @@ export async function POST(req: Request) {
     }
     for (const u of urls) await assertPublicUrl(u);
     emit({ type: "status", text: "Reading one item's page" });
-    const catalogue = await sampleItemPage(urls, cookieFor(urls[0]));
-    emit({ type: "result", pattern, catalogue });
+    try {
+      const catalogue = await sampleItemPage(urls, cookieFor(urls[0]));
+      emit({ type: "result", pattern, catalogue });
+    } catch (e) {
+      if (e instanceof HeavyPagesError) emit({ type: "none", message: e.message });
+      else throw e;
+    }
   });
 }

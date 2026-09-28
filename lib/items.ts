@@ -47,6 +47,9 @@ export interface ItemSpec {
   mode: "static" | "browser";
 }
 
+/** Item pages too heavy to analyse (whole articles, not records). */
+export class HeavyPagesError extends Error {}
+
 export interface ItemResult {
   url: string;
   ok: boolean;
@@ -231,39 +234,65 @@ interface EngineSingle { key: string; sel: string; attr: string; name: string; v
 const JUNK_TEXT = /^(sign in|log ?in|register|register now|show (all|more)|read more|see (all|more)|more|back|next|previous|share|follow|menu|close|accept|cookie|home|marketplace|search|filters?)$/i;
 
 /**
- * What kinds of content a page has: its site-assigned hooks and class names,
- * minus scripts and page chrome. Pages differ from each other in these when
- * one has a section the others lack (a team, a product list).
+ * What kinds of content a page has, and how many of each.
+ *
+ * Read by scanning the markup as text rather than building a document: a
+ * 2.4 MB article costs hundreds of megabytes as a DOM, and this runs over
+ * every fetched page.
  */
-function features(html: string): { set: Set<string>; text: number } {
-  const { document } = parseHTML(html);
-  document.querySelectorAll("script, style, noscript, template, svg, nav, header, footer").forEach((e: Element) => e.remove());
+function features(html: string): { set: Set<string>; counts: Map<string, number>; text: number } {
   const set = new Set<string>();
-  document.body?.querySelectorAll("*").forEach((el: Element) => {
-    const t = el.getAttribute("data-testid");
-    if (t) set.add(`t:${t}`);
-    const st = el.getAttribute("data-styleid");
-    if (st) set.add(`s:${st}`);
-    for (const c of (el.getAttribute("class") ?? "").split(/\s+/)) if (c && c.length < 60) set.add(`c:${c}`);
-  });
-  return { set, text: clean(document.body?.textContent).length };
+  const counts = new Map<string, number>();
+  for (const m of html.matchAll(/\sdata-testid=["']([^"']{1,60})["']/g)) {
+    set.add(`t:${m[1]}`);
+    counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+  }
+  for (const m of html.matchAll(/\sdata-styleid=["']([^"']{1,60})["']/g)) set.add(`s:${m[1]}`);
+  for (const m of html.matchAll(/\sclass=["']([^"']{0,300})["']/g)) {
+    for (const c of m[1].split(/\s+/)) if (c && c.length < 60) set.add(`c:${c}`);
+  }
+  // Rough size of the words on the page, ignoring tags.
+  const text = html.replace(/<(script|style)[\s\S]*?<\/\1>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").length;
+  return { set, counts, text };
 }
 
 /**
- * Pick pages that together show the most different kinds of content: at least
- * `min`, then more for as long as each adds a few kinds not seen yet (a team
- * section on one page in six is exactly the kind of thing worth catching).
+ * Pick which pages to analyse.
+ *
+ * Two things matter. Coverage: pages that between them show every kind of
+ * content. Depth: for each kind of card, the page that shows the MOST of them,
+ * because a field only some cards carry (a job title on one person in three)
+ * is only discovered where there are enough cards to carry it.
  */
 function diverse(pages: Array<{ url: string; html: string }>, min: number, max: number): Array<{ url: string; html: string }> {
   const scored = pages.filter((p) => p.html).map((p) => ({ ...p, f: features(p.html) }));
+  if (!scored.length) return pages.slice(0, min);
   const chosen: typeof scored = [];
+  const take = (p: (typeof scored)[number]) => {
+    if (!chosen.includes(p)) chosen.push(p);
+  };
+
+  // Depth first: the page with the most of each repeated card kind.
+  const hooks = new Map<string, number>();
+  for (const p of scored) p.f.counts.forEach((n, h) => { if (n >= 2) hooks.set(h, Math.max(hooks.get(h) ?? 0, n)); });
+  const deepest = [...hooks.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([h]) => scored.reduce((best, p) => ((p.f.counts.get(h) ?? 0) > (best.f.counts.get(h) ?? 0) ? p : best), scored[0]));
+  // One page usually holds the most of several kinds, so this stays small.
+  for (const p of deepest) {
+    if (chosen.length >= max) break;
+    take(p);
+  }
+
+  // Then coverage: pages adding kinds nothing chosen has yet.
   const covered = new Set<string>();
-  while (chosen.length < max && scored.length) {
+  chosen.forEach((p) => p.f.set.forEach((x) => covered.add(x)));
+  const rest = scored.filter((p) => !chosen.includes(p));
+  while (chosen.length < max && rest.length) {
     let best = 0;
     let bestGain = -1;
     let bestScore = -1;
-    scored.forEach((p, i) => {
-      // The site's own field hooks say what a section is; class names mostly say how it looks.
+    rest.forEach((p, i) => {
       let gain = 0;
       let styling = 0;
       p.f.set.forEach((x) => {
@@ -275,32 +304,63 @@ function diverse(pages: Array<{ url: string; html: string }>, min: number, max: 
       if (score > bestScore) { bestScore = score; bestGain = gain; best = i; }
     });
     if (chosen.length >= min && bestGain < 3) break;
-    const [pick] = scored.splice(best, 1);
+    const [pick] = rest.splice(best, 1);
     pick.f.set.forEach((x) => covered.add(x));
-    chosen.push(pick);
+    take(pick);
   }
-  const rest = pages.filter((p) => !p.html).slice(0, Math.max(0, min - chosen.length));
-  return [...chosen.map(({ url, html }) => ({ url, html })), ...rest];
+  return chosen.map(({ url, html }) => ({ url, html }));
 }
 
 /**
  * Open item pages and list everything they offer. The first row's page is
- * often a sparse one (no team, no description), so up to 32 are fetched
- * cheaply, the six that differ most are analysed, and their fields merged.
+ * often a sparse one (no team, no description), and a section only some items
+ * have (a team) may sit on one page in six. So up to 40 pages are fetched
+ * cheaply, up to 12 are analysed (the richest of each card kind, then the
+ * widest coverage), and their fields are merged.
  */
 export async function sampleItemPage(urls: string[], cookie?: string): Promise<ItemCatalogue> {
-  const deadline = Date.now() + 75_000; // the route has 120 s; leave room for naming and the reply
-  const queue = urls.slice(0, 24);
+  const deadline = Date.now() + 75_000; // the route has 300 s; leave room for naming and the reply
+  // Page weight varies hugely (an exhibitor profile is ~200 KB, a Wikipedia
+  // article 2.4 MB). Budget bytes, not just page counts, or 40 heavy pages
+  // exhaust memory and take the process down.
+  const PAGE_CAP = 3_000_000;
+  const FETCH_BUDGET = 30_000_000;
+  let bytes = 0;
+  const queue = urls.slice(0, 40);
   const fetched: Array<{ url: string; html: string }> = [];
   await Promise.all(Array.from({ length: 8 }, async () => {
-    while (queue.length && Date.now() < deadline - 45_000) {
+    while (queue.length && Date.now() < deadline - 40_000 && bytes < FETCH_BUDGET) {
       const u = queue.shift()!;
       const r = await fetchHtml(u, cookie, 10_000).catch(() => null);
-      fetched.push({ url: u, html: r?.status === 200 ? r.html : "" });
+      const html = r?.status === 200 && r.html.length <= PAGE_CAP ? r.html : "";
+      bytes += html.length;
+      fetched.push({ url: u, html });
     }
   }));
-  // Rendering plain HTML is cheap: look at every page that adds something new.
-  const chosen = diverse(fetched, 4, 10);
+  // Whole-article pages (a 2.4 MB encyclopedia entry per row) cost far more to
+  // lay out than they are worth, and rows on such pages are rarely what anyone
+  // wants in a spreadsheet. Say so instead of grinding through them.
+  const PAGE_LIMIT = 800_000;
+  const usable = fetched.filter((f) => f.html && f.html.length <= PAGE_LIMIT);
+  if (!usable.length) {
+    const sizes = fetched.map((f) => f.html.length).filter(Boolean).sort((x, y) => x - y);
+    const median = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 0;
+    throw new HeavyPagesError(
+      median
+        ? `Each item's page is a whole document (about ${Math.round(median / 100_000) / 10} MB), too heavy to read for every row. The rows above still export.`
+        : "None of the item pages could be read. The rows above still export.",
+    );
+  }
+
+  // Laying out a page costs time and memory in proportion to its size, so cap
+  // the analysed set by weight as well as by count.
+  const ANALYSE_BUDGET = 4_000_000;
+  let spent = 0;
+  const chosen = diverse(usable, 4, 12).filter((c, i) => {
+    spent += c.html.length;
+    return i < 3 || spent <= ANALYSE_BUDGET;
+  });
+  if (process.env.SS_DEBUG) console.log("[sample] fetched", fetched.filter((f) => f.html).length, "| team pages fetched:", fetched.filter((f) => f.html.includes('data-testid="teamMember"')).map((f) => f.url.split("/").pop()).join(","), "| chosen:", chosen.map((c) => c.url.split("/").pop()).join(","));
 
   type Found = { lists: EngineList[]; singles: EngineSingle[] };
   const useful = (f: Found | null) => !!f && (f.lists.some((l) => !l.chrome && l.columns.length > 0) || f.singles.length >= 3);
@@ -342,6 +402,8 @@ export async function sampleItemPage(urls: string[], cookie?: string): Promise<I
   if (!pages.length) throw new Error("The item pages couldn't be opened.");
 
   // Merge: lists match across pages by their selector, fields by selector + attribute.
+  const MAX_FIELDS = 600;   // while merging: a long article yields thousands
+  const OFFER_LIMIT = 80;   // what a person can actually look through
   const listIds = new Map<string, string>();
   const lists: ItemList[] = [];
   const people = new Set<string>();
@@ -364,6 +426,7 @@ export async function sampleItemPage(urls: string[], cookie?: string): Promise<I
       for (const c of cols) {
         const key = `${id}|${c.key}`;
         const f = fields.get(key);
+        if (!f && fields.size >= MAX_FIELDS) continue;
         const joined = c.values.join("\u0001");
         if (f) {
           f.hits++;
@@ -375,6 +438,7 @@ export async function sampleItemPage(urls: string[], cookie?: string): Promise<I
     for (const sg of pg.found.singles) {
       if (JUNK_TEXT.test(sg.value)) continue;
       const f = fields.get(sg.key);
+      if (!f && fields.size >= MAX_FIELDS) continue;
       if (f) {
         f.hits++;
         f.values.push(sg.value);
@@ -422,7 +486,9 @@ export async function sampleItemPage(urls: string[], cookie?: string): Promise<I
 
   // Lists first (they are usually why item pages matter), then the rest.
   const rank = (f: ItemField) => (f.listId ? (people.has(f.listId) ? 0 : 2) : 1);
-  const ordered = all.sort((x, y) => rank(x) - rank(y) || Number(y.suggested) - Number(x.suggested));
+  const ordered = all
+    .sort((x, y) => rank(x) - rank(y) || Number(y.suggested) - Number(x.suggested) || y.hits - x.hits)
+    .slice(0, OFFER_LIMIT);
   const readable = ordered.filter((f) => f.suggested);
   const staticShare = readable.length ? readable.filter((f) => f.staticOK).length / readable.length : 1;
   return {

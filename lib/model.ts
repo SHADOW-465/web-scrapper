@@ -116,12 +116,30 @@ export function openWorkspace(list: PageList, feeds: Feed[]): Workspace {
   return { listId: list.id, columns: cols, match, feedId: match?.apiId ?? null };
 }
 
+/** Addresses, images, blobs, constants and repeats are rarely wanted by default. */
+function wantedByDefault(f: FeedField, feed: Feed): boolean {
+  if (f.plumbing || f.fill < 0.5) return false;
+  if (/^(https?:)?\/\//i.test(f.sample) || /\.(png|jpe?g|gif|svg|webp)(\?|$)/i.test(f.sample)) return false;
+  if (f.sample.length > 180) return false;
+  const cell = (k: string, r: Record<string, unknown>) => String(r[k] ?? "").trim().replace(/^["']|["']$/g, "").toLowerCase();
+  // The same value on every row (a role, a counter) tells the reader nothing.
+  if (feed.rows.length >= 3 && new Set(feed.rows.map((r) => cell(f.key, r))).size < 2) return false;
+  // A field repeating another field's values (Stand name beside Stand) adds nothing.
+  const vals = (k: string) => feed.rows.map((r) => cell(k, r)).join("\u0001");
+  const mine = vals(f.key);
+  return !feed.fields.some((o) => o.key !== f.key && o.key.length < f.key.length && vals(o.key) === mine);
+}
+
 /** A dataset that exists only in a feed (nothing on screen matched it). */
 export function openFeedWorkspace(feed: Feed): Workspace {
   const fields = feed.fields.filter((f) => !f.plumbing && f.fill > 0.2);
-  const cols: Column[] = fields.map((f, i) => ({
-    id: `f-${f.key}`, name: f.label, ink: INKS[i % INKS.length], on: i < 8, feedKey: f.key, sample: f.sample,
-  }));
+  let budget = 8;
+  const cols: Column[] = fields.map((f, i) => {
+    const on = budget > 0 && wantedByDefault(f, feed);
+    if (on) budget--;
+    return { id: `f-${f.key}`, name: f.label, ink: INKS[i % INKS.length], on, feedKey: f.key, sample: f.sample };
+  });
+  if (!cols.some((c) => c.on) && cols[0]) cols[0].on = true;
   uniqueNames(cols);
   return { listId: `feed:${feed.id}`, columns: cols, match: null, feedId: feed.id };
 }
@@ -260,6 +278,24 @@ export function selfCheck(): string {
   const pr = pageRows(withTags, list, feed);
   if (pr[0]["Tags"] !== "x") throw new Error("page rows did not join feed-only column");
   if (feedTitle(feed) !== "Quotes") throw new Error(`feedTitle wrong: ${feedTitle(feed)}`);
+  const noisy: Feed = {
+    id: "api9", token: "t", endpoint: "GET x/y", jsonPath: "l", total: 9, paginated: true,
+    rows: [
+      { name: "A", logo: "https://x.test/a.png", stand: "C96", stand_name: '"C96"', about: "x".repeat(200), role: "exhibitor" },
+      { name: "B", logo: "https://x.test/b.png", stand: "D11", stand_name: '"D11"', about: "y".repeat(200), role: "exhibitor" },
+      { name: "C", logo: "https://x.test/c.png", stand: "E22", stand_name: '"E22"', about: "z".repeat(200), role: "exhibitor" },
+    ],
+    fields: [
+      { key: "name", label: "Name", sample: "A", fill: 1, plumbing: false },
+      { key: "logo", label: "Logo", sample: "https://x.test/a.png", fill: 1, plumbing: false },
+      { key: "stand", label: "Stand", sample: "C96", fill: 1, plumbing: false },
+      { key: "stand_name", label: "Stand name", sample: '"C96"', fill: 1, plumbing: false },
+      { key: "about", label: "About", sample: "x".repeat(200), fill: 1, plumbing: false },
+      { key: "role", label: "Role", sample: "exhibitor", fill: 1, plumbing: false },
+    ],
+  };
+  const fw = openFeedWorkspace(noisy).columns.filter((c) => c.on).map((c) => c.name);
+  if (fw.join() !== "Name,Stand") throw new Error(`feed defaults wrong: ${fw.join()}`);
   return "model ok";
 }
 

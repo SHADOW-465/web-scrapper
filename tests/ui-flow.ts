@@ -60,9 +60,11 @@ if (PEOPLE) {
     const names: string[] = [];
     firstGroup?.querySelectorAll("li.col").forEach((li) => {
       const name = (li.querySelector(".cname") as HTMLInputElement).value;
-      if (/^(name|designation|company)$/i.test(name)) {
+      const sample = (li.querySelector(".csample") as HTMLElement).innerText.trim();
+      // What a person would tick: the text about each person, not links or images.
+      if (names.length < 3 && sample && !/^https?:/i.test(sample) && !/^(new|show all)/i.test(sample)) {
         (li.querySelector(".cap") as HTMLButtonElement).click();
-        names.push(name);
+        names.push(`${name} (${sample.slice(0, 22)})`);
       }
     });
     return names;

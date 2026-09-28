@@ -2,7 +2,7 @@
 
 import { AlertTriangle, ArrowRight, Bookmark, BookmarkPlus, Check, Download, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { fetchChunk, LockedError, sampleItems, scanPage, unlock, type CrawlRequest, type ScanResult } from "@/lib/client-api";
+import { fetchChunk, LockedError, sampleItems, scanPage, SkippedItemsError, unlock, type CrawlRequest, type ScanResult } from "@/lib/client-api";
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
 import { discoveryRequest, fillPattern, findItemSource, sourceFromPastedUrl, specFor, spread, widerRows } from "@/lib/items-client";
 import { deleteJob, failedItems, finalRows, loadJobs, newJob, progressOf, runJob, type Job, type Progress } from "@/lib/job";
@@ -234,8 +234,8 @@ export default function Studio() {
     }
     if (!override) {
       source = findItemSource(scan.finalUrl, list, f, w, scan.snapshot);
-      if (source?.columnKey && list) urls = spread((list.columns.find((c) => c.key === source!.columnKey)?.values ?? []).filter(Boolean), 24);
-      else if (source?.key && source.pattern && f) urls = spread([...f.rows, ...extra], 24).map((r) => fillPattern(source!.pattern!, r[source!.key!])).filter(Boolean);
+      if (source?.columnKey && list) urls = spread((list.columns.find((c) => c.key === source!.columnKey)?.values ?? []).filter(Boolean), 40);
+      else if (source?.key && source.pattern && f) urls = spread([...f.rows, ...extra], 40).map((r) => fillPattern(source!.pattern!, r[source!.key!])).filter(Boolean);
       if (!urls.length && !f) {
         dispatch({ type: "items", wsId, items: { status: "none", message: "These rows don't link to pages of their own." } });
         return;
@@ -261,6 +261,7 @@ export default function Studio() {
       dispatch({ type: "items", wsId, items: { status: "ready", source: src, catalogue: res.catalogue } });
     } catch (e) {
       if (e instanceof LockedError) return setPhase("locked");
+      if (e instanceof SkippedItemsError) return dispatch({ type: "items", wsId, items: { status: "none", message: e.message } });
       dispatch({ type: "items", wsId, items: { status: "error", message: e instanceof Error ? e.message : String(e) } });
     }
   }, [scan, st.ws, st.lists, st.feeds, cookie]);
