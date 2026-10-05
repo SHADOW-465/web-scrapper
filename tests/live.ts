@@ -10,6 +10,7 @@ import { correlate } from "../lib/correlate";
 import { open } from "../lib/token";
 import { replayPages, type Replay } from "../lib/replay";
 import { scan } from "../lib/scan";
+import { initial, reducer } from "../lib/studio-state";
 
 const url = process.argv[2] ?? "https://quotes.toscrape.com/scroll";
 
@@ -34,16 +35,18 @@ for (const l of lists.slice(0, 5)) {
   console.log(`  - "${l.name}" x${l.count}: ${l.columns.map((c: any) => `${c.name}=${JSON.stringify(String(c.values[0]).slice(0, 28))}`).join(", ")}`);
 }
 
-const top = lists[0];
-if (!top) throw new Error("no list detected");
-const match = correlate(top, result.apis);
-if (!match) {
+const state = reducer({ ...initial, feeds: result.apis }, { type: "ready", lists, next: next as never });
+const workspace = state.active ? state.ws[state.active] : undefined;
+const top = lists.find(l => l.id === state.active);
+if (!workspace) throw new Error("no dataset detected");
+const match = top ? correlate(top, result.apis) : null;
+const api = result.apis.find((a) => a.id === workspace.feedId);
+if (!api) {
   console.log("no feed matched the top list (page-by-page capture would be used)");
   process.exit(0);
 }
-const api = result.apis.find((a) => a.id === match.apiId)!;
 console.log(`matched feed ${api.endpoint} [${api.jsonPath}] total=${api.total} paginated=${api.paginated}`);
-for (const p of match.pairs) {
+for (const p of match?.pairs ?? []) {
   const col = top.columns.find((c: any) => c.key === p.columnKey);
   console.log(`  "${col?.name}" <- ${p.apiKey} (${(p.score * 100).toFixed(0)}%)`);
 }
@@ -53,5 +56,5 @@ for await (const chunk of replayPages(open<Replay>(api.token), { maxRows: 72, de
   rows += chunk.rows.length;
   console.log(`  fetched ${rows}/${chunk.total}`);
 }
-if (rows < 50) throw new Error("replay returned too few rows");
+if (rows < Math.min(72, api.total ?? 72)) throw new Error("replay returned too few rows");
 console.log("live check passed");

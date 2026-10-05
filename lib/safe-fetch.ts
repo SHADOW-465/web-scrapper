@@ -15,13 +15,23 @@ export class BlockedFetchError extends Error {}
 export async function safeFetch(input: string, init: RequestInit & { timeoutMs?: number } = {}, maxRedirects = 4): Promise<Response> {
   let url = input;
   const { timeoutMs = 20_000, ...rest } = init;
+  // One deadline covers the whole redirect chain and respects cancellation.
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal = rest.signal ? AbortSignal.any([rest.signal, timeout]) : timeout;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const u = new URL(url);
     if (u.protocol !== "http:" && u.protocol !== "https:") throw new BlockedFetchError("Only web addresses can be fetched.");
     if (!(await resolvesPublic(u.hostname))) throw new BlockedFetchError("That address points at a private network.");
-    const res = await fetch(url, { ...rest, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+    const res = await fetch(url, { ...rest, redirect: "manual", signal });
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
-      url = new URL(res.headers.get("location")!, url).toString();
+      const next = new URL(res.headers.get("location")!, url);
+      if (next.origin !== u.origin) {
+        const headers = new Headers(rest.headers);
+        for (const name of ["cookie", "authorization", "proxy-authorization"]) headers.delete(name);
+        rest.headers = headers;
+      }
+      await res.body?.cancel();
+      url = next.toString();
       // A redirected POST becomes a GET, as browsers do.
       if (res.status !== 307 && res.status !== 308) {
         rest.method = "GET";

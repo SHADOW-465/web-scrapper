@@ -3,4 +3,4 @@ data/
 exports/
 .sessions/
 .impeccable/
-tests/
+output/

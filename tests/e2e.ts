@@ -46,7 +46,7 @@ console.log(`  wider sample: ${extra.length} rows from later in the list`);
 await call("/api/items/sample", { scanUrl: scan.finalUrl, discover: discoveryRequest(scan.finalUrl, feed, extra) }, (e) => {
   if (e.type === "status") console.log(`  .. ${e.text}`);
   if (e.type === "result") result = e;
-  if (e.type === "none") console.log("  no item pages found");
+  if (e.type === "none") console.log("  no item pages found:", e.message ?? "no verified page pattern");
   if (e.type === "error") throw new Error(String(e.message));
 });
 if (!result) process.exit(1);

@@ -10,7 +10,6 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { Browser, HTTPRequest, Page } from "puppeteer-core";
-import puppeteer from "puppeteer-core";
 import { isObviouslyInternal, resolvesPublic } from "./ssrf";
 
 export const USER_AGENT =
@@ -46,8 +45,14 @@ function localChrome(): string | undefined {
 }
 
 export async function launch(): Promise<Browser> {
+  // Keep startup/import failures inside the caller's error handling and allow
+  // direct JSON sources to work without initializing the browser package.
+  // Import both outside the platform branch so a build on Windows also traces
+  // Chromium's transitive dependencies for the deployment integrity test.
+  const [{ default: puppeteer }, { default: chromium }] = await Promise.all([
+    import("puppeteer-core"), import("@sparticuz/chromium"),
+  ]);
   if (process.platform === "linux" && (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME)) {
-    const chromium = (await import("@sparticuz/chromium")).default;
     return puppeteer.launch({
       args: await puppeteer.defaultArgs({ args: chromium.args, headless: "shell" }),
       executablePath: await chromium.executablePath(),

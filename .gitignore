@@ -15,6 +15,7 @@ exports/
 # Next.js build output
 .next/
 out/
+output/
 
 # TypeScript build cache
 *.tsbuildinfo

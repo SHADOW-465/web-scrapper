@@ -41,7 +41,7 @@ export function Welcome({ onTry }: { onTry: (url: string) => void }) {
 }
 
 const STEPS = ["Starting a browser", "Opening the page", "Waiting for the content to appear", "Reading what the page shows", "Matching it to the site's own data"];
-const OTHER = ["The page didn't load its content; trying again", "Reading the data address directly", "Reading the page without a browser", "Reading the page text with AI"];
+const OTHER = ["Checking the page address", "The page didn't load its content; trying again", "Reading the data address directly", "Reading the page without a browser", "Reading the page text with AI"];
 
 export function Printing({ host, status }: { host: string; status: string[] }) {
   const current = status[status.length - 1];
@@ -72,7 +72,7 @@ export function Printing({ host, status }: { host: string; status: string[] }) {
   );
 }
 
-export function Failed({ message, onRetry, onBack }: { message: string; onRetry: () => void; onBack: () => void }) {
+export function Failed({ message, kind, onRetry, onBack }: { message: string; kind?: "server" | "site"; onRetry: () => void; onBack: () => void }) {
   return (
     <div className="blank">
       <article className="page-paper">
@@ -81,9 +81,9 @@ export function Failed({ message, onRetry, onBack }: { message: string; onRetry:
           {message}
         </div>
         <p style={{ marginTop: 16 }}>
-          Some sites block automated browsers or only show their content after you sign in. If the page opens in your
+          {kind === "server" ? <>Scrape Studio could not complete this request. Try again. If it keeps failing, check the application server logs and its browser setup. A website cookie will not fix a server failure.</> : <>Some sites block automated browsers or only show their content after you sign in. If the page opens in your
           own browser, try again, or use <b>Signed-in page</b> with your cookie. If the site offers a data address
-          (one that returns JSON), you can paste that instead.
+          (one that returns JSON), you can paste that instead.</>}
         </p>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-primary" onClick={onRetry}>Try again</button>

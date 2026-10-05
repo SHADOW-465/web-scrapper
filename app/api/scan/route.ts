@@ -1,6 +1,6 @@
 import { denied, hasAccess } from "@/lib/access";
 import { ndjson } from "@/lib/ndjson";
-import { scan } from "@/lib/scan";
+import { scan, SiteReadError } from "@/lib/scan";
 import { assertPublicUrl, BlockedUrlError } from "@/lib/ssrf";
 
 export const runtime = "nodejs";
@@ -8,8 +8,8 @@ export const maxDuration = 300; // slow sites plus up to two reloads
 
 /** POST { url, cookie? } -> NDJSON: status events, then one `result`. */
 export async function POST(req: Request) {
-  if (!hasAccess(req)) return denied();
   try {
+    if (!hasAccess(req)) return denied();
     const body = (await req.json().catch(() => ({}))) as { url?: string; cookie?: string };
     let target: URL;
     try {
@@ -27,7 +27,9 @@ export async function POST(req: Request) {
         emit({ type: "result", ...result });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        emit({ type: "error", message });
+        const kind = err instanceof SiteReadError ? "site" : "server";
+        console.error("[scan] request failed", { kind, message });
+        emit({ type: "error", message, kind });
       }
     });
   } catch (err: unknown) {

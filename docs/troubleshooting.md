@@ -1,8 +1,20 @@
 # Troubleshooting
 
-**"That page couldn't be read."** The site refused the server's browser, timed
-out, or needs a login. Try again once; use **Signed-in page** for pages behind
-a login. Sites with aggressive bot protection won't work, by design.
+**"Scrape Studio's server could not complete the request (HTTP 500)."** This
+is an application-server failure, not proof that the target website blocked
+scraping. Check the address/port of the app and its server logs. Confirm that
+the deployed version includes the browser binary and `lib/extractor.js`, and
+that production has `SCRAPE_SECRET` configured. Website cookies do not repair
+server crashes. Local verification is not deployment verification.
+
+**"The website answered HTTP 403/404/..."** This response came from the
+website itself. Check the page address; use **Signed-in page** if that page
+requires your login. Some automated-browser blocks cannot be resolved here.
+
+**Item pages reported as too heavy.** The size budget now applies after
+embedded scripts have been removed. Large hydration payloads alone no longer
+hide contact fields on otherwise small exhibitor pages. Actual large documents
+are still limited to keep sampling within memory.
 
 **"The page didn't load its content; trying again."** The site served an
 empty app shell. The scan reloads up to twice. If it still fails, read it again.

@@ -27,8 +27,11 @@ export function hasAccess(req: Request): boolean {
   if (!want) return true;
   const cookie = req.headers.get("cookie") ?? "";
   const m = cookie.match(new RegExp(`(?:^|;\\s*)${ACCESS_COOKIE}=([^;]+)`));
-  const got = m ? decodeURIComponent(m[1]) : "";
-  return got.length === want.length && timingSafeEqual(Buffer.from(got), Buffer.from(want));
+  let got = "";
+  try { got = m ? decodeURIComponent(m[1]) : ""; } catch { return false; }
+  const actual = Buffer.from(got);
+  const expectedBytes = Buffer.from(want);
+  return actual.length === expectedBytes.length && timingSafeEqual(actual, expectedBytes);
 }
 
 export function denied(): Response {

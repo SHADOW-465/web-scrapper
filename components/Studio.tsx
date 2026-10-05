@@ -2,7 +2,7 @@
 
 import { AlertTriangle, ArrowRight, Bookmark, BookmarkPlus, Check, Download, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { fetchChunk, LockedError, sampleItems, scanPage, SkippedItemsError, unlock, type CrawlRequest, type ScanResult } from "@/lib/client-api";
+import { fetchChunk, LockedError, sampleItems, scanPage, ScanError, SkippedItemsError, unlock, type CrawlRequest, type ScanResult } from "@/lib/client-api";
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
 import { discoveryRequest, fillPattern, findItemSource, sourceFromPastedUrl, specFor, spread, widerRows } from "@/lib/items-client";
 import { deleteJob, failedItems, finalRows, loadJobs, newJob, progressOf, runJob, type Job, type Progress } from "@/lib/job";
@@ -48,6 +48,7 @@ export default function Studio() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [status, setStatus] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [errorKind, setErrorKind] = useState<"server" | "site">("server");
   const [scan, setScan] = useState<ScanResult | null>(null);
   const [st, dispatch] = useReducer(reducer, initial);
   const [scope, setScopeRaw] = useState<Scope>("page");
@@ -97,6 +98,9 @@ export default function Studio() {
     const u = normalizeUrl(target);
     if (!u) return;
     abort.current?.abort();
+    jobAbort.current?.abort();
+    jobAbort.current = null;
+    setRun(null);
     const ac = new AbortController();
     abort.current = ac;
     setUrl(u);
@@ -111,6 +115,7 @@ export default function Studio() {
     dispatch({ type: "reset" });
     try {
       const r = await scanPage(u, cookie.trim() || undefined, (s) => setStatus((p) => [...p, s]), ac.signal);
+      if (ac.signal.aborted) return;
       setScan(r);
       dispatch({ type: "scanned", feeds: r.apis });
       setPhase("ready");
@@ -119,6 +124,7 @@ export default function Studio() {
       if (ac.signal.aborted) return;
       if (e instanceof LockedError) return setPhase("locked");
       setError(e instanceof Error ? e.message : String(e));
+      setErrorKind(e instanceof ScanError ? e.kind : "server");
       setPhase("error");
     }
   }, [cookie]);
@@ -219,6 +225,8 @@ export default function Studio() {
 
   const lookForItems = useCallback(async (wsId: string, override?: { urls: string[]; source: ItemSource | null }) => {
     if (!scan) return;
+    const signal = abort.current?.signal;
+    const updateItems = (action: Parameters<typeof dispatch>[0]) => { if (!signal?.aborted) dispatch(action); };
     const w: Workspace | undefined = st.ws[wsId];
     if (!w) return;
     const list = st.lists.find((l) => l.id === wsId);
@@ -229,40 +237,43 @@ export default function Studio() {
     let urls = override?.urls ?? [];
     let extra: Row[] = [];
     if (!override && f) {
-      dispatch({ type: "items", wsId, items: { status: "looking", message: "Picking sample items from across the list" } });
-      extra = await widerRows(f, async (i, n) => (await fetchChunk(f.token, i, undefined, n)).rows).catch(() => []);
+      updateItems({ type: "items", wsId, items: { status: "looking", message: "Picking sample items from across the list" } });
+      extra = await widerRows(f, async (i, n) => (await fetchChunk(f.token, i, signal, n)).rows).catch(() => []);
     }
+    if (signal?.aborted) return;
     if (!override) {
       source = findItemSource(scan.finalUrl, list, f, w, scan.snapshot);
       if (source?.columnKey && list) urls = spread((list.columns.find((c) => c.key === source!.columnKey)?.values ?? []).filter(Boolean), 40);
       else if (source?.key && source.pattern && f) urls = spread([...f.rows, ...extra], 40).map((r) => fillPattern(source!.pattern!, r[source!.key!])).filter(Boolean);
       if (!urls.length && !f) {
-        dispatch({ type: "items", wsId, items: { status: "none", message: "These rows don't link to pages of their own." } });
+        updateItems({ type: "items", wsId, items: { status: "none", message: "These rows don't link to pages of their own." } });
         return;
       }
     }
-    dispatch({ type: "items", wsId, items: { status: "looking" } });
+    updateItems({ type: "items", wsId, items: { status: "looking" } });
     try {
       const res = await sampleItems({
         scanUrl: scan.finalUrl,
         cookie: cookie.trim() || undefined,
         urls: urls.length ? urls : undefined,
         discover: urls.length || !f ? undefined : discoveryRequest(scan.finalUrl, f, extra),
-      }, (text) => dispatch({ type: "items", wsId, items: { status: "looking", message: text } }));
+      }, (text) => updateItems({ type: "items", wsId, items: { status: "looking", message: text } }), signal);
+      if (signal?.aborted) return;
       if (!res) {
-        dispatch({ type: "items", wsId, items: { status: "none" } });
+        updateItems({ type: "items", wsId, items: { status: "none" } });
         return;
       }
       const src = source ?? res.pattern;
       if (!src) {
-        dispatch({ type: "items", wsId, items: { status: "error", message: "That page was read, but none of the rows' values appear in its address, so rows can't be matched to their pages." } });
+        updateItems({ type: "items", wsId, items: { status: "error", message: "That page was read, but none of the rows' values appear in its address, so rows can't be matched to their pages." } });
         return;
       }
-      dispatch({ type: "items", wsId, items: { status: "ready", source: src, catalogue: res.catalogue } });
+      updateItems({ type: "items", wsId, items: { status: "ready", source: src, catalogue: res.catalogue } });
     } catch (e) {
+      if (signal?.aborted) return;
       if (e instanceof LockedError) return setPhase("locked");
-      if (e instanceof SkippedItemsError) return dispatch({ type: "items", wsId, items: { status: "none", message: e.message } });
-      dispatch({ type: "items", wsId, items: { status: "error", message: e instanceof Error ? e.message : String(e) } });
+      if (e instanceof SkippedItemsError) return updateItems({ type: "items", wsId, items: { status: "none", message: e.message } });
+      updateItems({ type: "items", wsId, items: { status: "error", message: e instanceof Error ? e.message : String(e) } });
     }
   }, [scan, st.ws, st.lists, st.feeds, cookie]);
 
@@ -284,7 +295,9 @@ export default function Studio() {
 
   /* -------------------------------------------------------- preview */
 
-  const runMatches = !!run && !!ws && run.job.ws.listId === ws.listId && run.job.scope === scope && run.state !== "error";
+  const crawlSelection = (w: Workspace) => JSON.stringify(w.columns.filter((c) => c.on && c.page).map((c) => ({name:c.name,page:c.page})));
+  const runMatches = !!run && !!ws && run.job.scanUrl === scan?.finalUrl && run.job.ws.listId === ws.listId && run.job.scope === scope && run.state !== "error"
+    && (scope !== "crawl" || (run.job.crawl?.maxPages === maxPages && run.job.crawl?.mode === crawlMode && crawlSelection(run.job.ws) === crawlSelection(ws)));
   const rows: Row[] = useMemo(() => {
     if (!ws) return [];
     if (runMatches && run) return finalRows({ ...run.job, ws });
@@ -326,8 +339,9 @@ export default function Studio() {
       const done = await runJob(job, {
         signal: ac.signal,
         cookie: cookie.trim() || undefined,
-        onUpdate: (j, p) => setRun({ job: j, progress: p, state: "running" }),
+        onUpdate: (j, p) => { if (jobAbort.current === ac) setRun({ job: j, progress: p, state: "running" }); },
       });
+      if (ac.signal.aborted || jobAbort.current !== ac) return;
       const { count, filename } = await deliver(done);
       const failed = failedItems(done).length;
       setRun({
@@ -336,6 +350,7 @@ export default function Studio() {
       });
       await deleteJob(done.id);
     } catch (e) {
+      if (jobAbort.current !== ac) return;
       if (ac.signal.aborted) {
         setRun((r) => (r ? { ...r, state: "stopped", message: "Paused. Progress is saved; resume any time within 6 hours." } : r));
       } else if (e instanceof LockedError) {
@@ -487,7 +502,7 @@ export default function Studio() {
         </div>
       )}
       {phase === "scanning" && <Printing host={hostOf(url)} status={status} />}
-      {phase === "error" && <Failed message={error} onRetry={() => void startScan(url)} onBack={() => setPhase("idle")} />}
+      {phase === "error" && <Failed message={error} kind={errorKind} onRetry={() => void startScan(url)} onBack={() => setPhase("idle")} />}
       {phase === "locked" && <Locked onUnlock={async (pw) => { const ok = await unlock(pw); if (ok) { setPhase("idle"); if (url) void startScan(url); } return ok; }} />}
 
       {phase === "ready" && scan && (

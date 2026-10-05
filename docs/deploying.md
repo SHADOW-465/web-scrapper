@@ -3,6 +3,9 @@
 The app is a standard Next.js project; Vercel detects it with no configuration
 file.
 
+Use Node.js **24.x**, as pinned in `package.json`. The browser dependencies
+require newer Node versions than the former `>=20` setting guaranteed.
+
 ## Steps
 
 1. Push this folder to a Git repository and import it in Vercel, or run
@@ -20,6 +23,12 @@ file.
 3. Deploy. The first scan after a deploy takes a few seconds longer while
    Chromium unpacks.
 
+Before pushing, run `npm run build && npm run test:deployment`. The second
+check copies only traced dependencies to an isolated temporary directory and
+imports them. A successful build alone does not prove a cloud function can
+start: Next 16.3.5 omitted Puppeteer's `browser-data` modules from its trace.
+`next.config.ts` explicitly includes those files and Chromium's runtime assets.
+
 ## What runs where
 
 | Route | Max duration | Work |
@@ -33,8 +42,7 @@ file.
 
 Chromium comes from `@sparticuz/chromium`, the build sized for serverless
 functions. `next.config.ts` keeps it out of bundling and traces its `bin/`
-folder into the scan and crawl functions. The traced scan function is about
-74 MB, under Vercel's 250 MB limit. The legacy Python code, data exports, and
+folder into the browser-using functions. The legacy Python code, data exports, and
 docs are excluded from function bundles and from upload (`.vercelignore`).
 
 Functions run on Fluid Compute with Vercel's default 2 GB memory, which

@@ -88,11 +88,14 @@ async function toPdf(rows: Row[], fields: string[], title: string, fonts: FontLo
   autoTable(doc, {
     startY: 68,
     head: [fields],
-    body: rows.map((r) => fields.map((f) => cell(r[f]).slice(0, 300))),
+    body: rows.map((r) => fields.map((f) => cell(r[f]))),
     styles: { font: face, fontSize: 7.5, cellPadding: 3, overflow: "linebreak", textColor: 29 },
     headStyles: { fillColor: [29, 31, 34], textColor: 255, fontStyle: "bold" },
     alternateRowStyles: { fillColor: [246, 247, 248] },
     margin: { left: 36, right: 36 },
+    horizontalPageBreak: fields.length > 8,
+    horizontalPageBreakRepeat: 0,
+    rowPageBreak: "avoid",
     didDrawPage: (d) => {
       doc.setFontSize(8);
       doc.setTextColor(120);

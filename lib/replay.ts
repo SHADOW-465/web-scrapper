@@ -80,6 +80,7 @@ export async function* replayPages(
   let total: number | null = null;
 
   while (true) {
+    if (Date.now() >= opts.deadline) return;
     const { url, body } = pageRequest(r, index);
     let payload: unknown = null;
     for (let attempt = 0; ; attempt++) {
@@ -89,7 +90,7 @@ export async function* replayPages(
           method,
           headers: body != null && method !== "GET" ? { "content-type": "application/json", ...headers } : headers,
           body: body != null && method !== "GET" ? JSON.stringify(body) : undefined,
-          timeoutMs: 30_000,
+          timeoutMs: Math.max(1, Math.min(20_000, opts.deadline - Date.now())),
         });
         status = res.status;
         if (res.ok) {
@@ -102,7 +103,9 @@ export async function* replayPages(
       if (attempt >= 2 || (status && !RETRYABLE.has(status))) {
         throw new PageError(status ? `The site answered ${status} for page ${index + 1} of its data.` : `Page ${index + 1} of the site's data didn't arrive.`, index);
       }
-      await new Promise((res) => setTimeout(res, 800 * 3 ** attempt));
+      const wait = 800 * 3 ** attempt;
+      if (Date.now() + wait >= opts.deadline) return;
+      await new Promise((res) => setTimeout(res, wait));
     }
 
     total ??= findTotal(payload);

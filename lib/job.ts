@@ -174,12 +174,16 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
   try {
     if (job.stage === "rows") {
       if (job.scope === "feed" && job.feed?.token && job.feed.paginated) {
+        let stalled = 0;
         for (;;) {
           status = "";
           const chunk = await withRetry(`Page ${job.nextIndex + 1}`, () => fetchChunk(job.feed!.token, job.nextIndex, signal), signal, wait);
+          const noProgress = !chunk.rows.length && (chunk.next === job.nextIndex || chunk.failedAt === job.nextIndex);
+          stalled = noProgress ? stalled + 1 : 0;
           job.raw.push(...chunk.rows);
           job.total = chunk.total ?? job.total;
           job.pages += chunk.pages;
+          if (stalled >= 3) throw new Error(chunk.error || "The website repeatedly returned no progress. Your rows are saved; retry this export later.");
           if (chunk.failedAt != null) {
             // The server retried a page and gave up; keep what arrived and retry from that page.
             job.nextIndex = chunk.failedAt;

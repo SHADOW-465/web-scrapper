@@ -82,17 +82,21 @@ export function dig(payload: Json, path: string): Json {
 /** A server-reported total row count, wherever it hides. */
 export function findTotal(payload: Json): number | null {
   if (!isObj(payload)) return null;
-  for (const k of TOTAL_KEYS) {
-    const v = payload[k];
-    if (typeof v === "number" && Number.isInteger(v) && v > 0) return v;
-  }
-  for (const v of Object.values(payload)) {
-    if (isObj(v)) {
-      const t = findTotal(v);
-      if (t) return t;
+  const search = (obj: Record<string, Json>, keys: string[]): number | null => {
+    for (const k of keys) {
+      const v = obj[k];
+      if (typeof v === "number" && Number.isInteger(v) && v >= 0) return v;
     }
-  }
-  return null;
+    for (const v of Object.values(obj)) {
+      if (isObj(v)) {
+        const t = search(v, keys);
+        if (t !== null) return t;
+      }
+    }
+    return null;
+  };
+  // `count` often describes this page, while `data.total` describes the dataset.
+  return search(payload, TOTAL_KEYS.filter((k) => k !== "count")) ?? search(payload, ["count"]);
 }
 
 function pickLimit(source: Record<string, Json>): { limitKey?: string; pageSize?: number } {

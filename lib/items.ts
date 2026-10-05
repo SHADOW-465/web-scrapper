@@ -50,6 +50,13 @@ export interface ItemSpec {
 /** Item pages too heavy to analyse (whole articles, not records). */
 export class HeavyPagesError extends Error {}
 
+/** Budget the markup we actually analyse, not embedded hydration scripts. */
+export function prepareItemHtml(html: string, url: string): string {
+  // Drop large script payloads before constructing a DOM. sanitizeStatic remains
+  // the security boundary and removes all other active content afterwards.
+  return sanitizeStatic(html.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, ""), url);
+}
+
 export interface ItemResult {
   url: string;
   ok: boolean;
@@ -332,8 +339,8 @@ export async function sampleItemPage(urls: string[], cookie?: string): Promise<I
     while (queue.length && Date.now() < deadline - 40_000 && bytes < FETCH_BUDGET) {
       const u = queue.shift()!;
       const r = await fetchHtml(u, cookie, 10_000).catch(() => null);
-      const html = r?.status === 200 && r.html.length <= PAGE_CAP ? r.html : "";
-      bytes += html.length;
+      bytes += r?.html.length ?? 0;
+      const html = r?.status === 200 && r.html.length <= PAGE_CAP ? prepareItemHtml(r.html, r.finalUrl || u) : "";
       fetched.push({ url: u, html });
     }
   }));
@@ -511,7 +518,7 @@ async function readOneStatic(url: string, spec: ItemSpec, cookie?: string): Prom
     try {
       const r = await fetchHtml(url, cookie, 20_000);
       status = r.status;
-      if (r.status === 200 && r.html) return { url, ok: true, ...extractStatic(r.html, url, spec) };
+      if (r.status === 200 && r.html) return { url, ok: true, ...extractStatic(r.html.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, ""), r.finalUrl || url, spec) };
     } catch {
       /* network error: retry */
     }

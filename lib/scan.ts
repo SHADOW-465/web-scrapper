@@ -62,6 +62,13 @@ interface Captured {
 const MAX_CAPTURES = 80;
 const SAMPLE_ROWS = 80;
 
+/** A complete response must not become an 80-row export. Only paged feeds are sampled. */
+export function sourceRows(records: Record<string, unknown>[], paginated: boolean): Flat[] {
+  return (paginated ? records.slice(0, SAMPLE_ROWS) : records).map((r) => flatten(r));
+}
+
+export class SiteReadError extends Error {}
+
 export function profile(rows: Flat[]): ApiField[] {
   const keys: string[] = [];
   for (const r of rows) for (const k of Object.keys(r)) if (!keys.includes(k)) keys.push(k);
@@ -136,13 +143,16 @@ async function readJsonAddress(url: string, cookie?: string): Promise<ScanResult
   } catch {
     return null;
   }
-  if (!res.ok || !(res.headers.get("content-type") ?? "").toLowerCase().includes("json")) return null;
+  if (!res.ok || !(res.headers.get("content-type") ?? "").toLowerCase().includes("json")) {
+    await res.body?.cancel();
+    return null;
+  }
   const payload = await res.json().catch(() => null);
   const sets = payload ? findRecordSets(payload) : [];
   const best = sets.sort((a, b) => b.records.length - a.records.length)[0];
   if (!best || best.records.length < 2) return null;
-  const rows = best.records.slice(0, SAMPLE_ROWS).map((r) => flatten(r));
   const pagination = detectPagination(url, null);
+  const rows = sourceRows(best.records, !!pagination);
   const replay: Replay = { url, method: "GET", headers: { accept: "application/json", "user-agent": UA, ...(cookie ? { cookie } : {}) }, body: null, jsonPath: best.path, pagination };
   const u = new URL(url);
   const title = `Data from ${u.hostname}`;
@@ -152,7 +162,7 @@ async function readJsonAddress(url: string, cookie?: string): Promise<ScanResult
   );
   const apis: ApiSource[] = [{
     id: "api1", token: seal(replay), endpoint: `GET ${u.host}${u.pathname}`, jsonPath: best.path, rows,
-    total: findTotal(payload), paginated: !!pagination, fields: profile(rows),
+    total: pagination ? findTotal(payload) : rows.length, paginated: !!pagination, fields: profile(rows),
   }];
   await polishNames(title, apis);
   return { url, finalUrl: url, title, snapshot: snap.html, snapshotBytes: snap.bytes, apis, notes: [] };
@@ -162,7 +172,7 @@ async function readJsonAddress(url: string, cookie?: string): Promise<ScanResult
 async function scanWithoutBrowser(url: string, cookie: string | undefined, say: (t: string) => void): Promise<ScanResult> {
   say("Reading the page without a browser");
   const { status, html, finalUrl } = await fetchHtml(url, cookie, 20_000);
-  if (status !== 200 || !html) throw new Error(`The site answered ${status || "nothing"} for that page.`);
+  if (status !== 200 || !html) throw new SiteReadError(`The website answered HTTP ${status || "nothing"} for that page.`);
   const inert = sanitizeStatic(html, finalUrl);
   const { document } = parseHTML(inert);
   const title = document.title ?? "";
@@ -180,11 +190,11 @@ export async function scan(
 ): Promise<ScanResult> {
   const say = opts.status ?? (() => undefined);
 
-  if (/\/api\/|\.json(\?|$)|\/v\d+\/|graphql/i.test(url)) {
-    say("Reading the data address directly");
-    const direct = await readJsonAddress(url, opts.cookie);
-    if (direct) return direct;
-  }
+  // Data endpoints need not contain /api/ or end in .json. Inspect the response
+  // type and release HTML bodies immediately before opening the browser.
+  say("Checking the page address");
+  const direct = await readJsonAddress(url, opts.cookie);
+  if (direct) return direct;
 
   const notes: string[] = [];
   const captured: Captured[] = [];
@@ -219,12 +229,14 @@ export async function scan(
     });
 
     say("Opening the page");
+    let response: HTTPResponse | null = null;
     try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 35_000 });
+      response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 35_000 });
     } catch (e) {
       notes.push("The page was slow to load, so this shows whatever had arrived.");
-      if (!page.url() || page.url() === "about:blank") throw new Error(`Couldn't open that page (${e instanceof Error ? e.message.split("\n")[0] : e}).`);
+      if (!page.url() || page.url() === "about:blank" || page.url().startsWith("chrome-error:")) throw new SiteReadError(`Couldn't open that page (${e instanceof Error ? e.message.split("\n")[0] : e}).`);
     }
+    if (response && response.status() >= 400) throw new SiteReadError(`The website answered HTTP ${response.status()} for that page. Check the address${[401, 403].includes(response.status()) ? " or use Signed-in page if it requires a login" : " and try again later"}.`);
 
     // Some single-page apps (Frankfurter Buchmesse among them) only fetch their
     // data on some visits and otherwise render an empty shell. When a visit
@@ -289,12 +301,12 @@ export async function scan(
         }
       }
       for (const set of findRecordSets(cap.payload)) {
-        const rows = set.records.slice(0, SAMPLE_ROWS).map((r) => flatten(r));
+        const pagination = detectPagination(cap.url, body);
+        const rows = sourceRows(set.records, !!pagination);
         if (rows.length < 2) continue;
         const signature = `${Object.keys(rows[0]).slice(0, 20).sort().join(",")}|${rows.length}|${JSON.stringify(rows[0]).slice(0, 200)}`;
         if (seen.has(signature)) continue;
         seen.add(signature);
-        const pagination = detectPagination(cap.url, body);
         const key = datasetKey(cap.method, cap.url, body, set.path, pagination);
         const sibling = pagination ? byEndpoint.get(key) : undefined;
         if (sibling) {
@@ -309,7 +321,7 @@ export async function scan(
         const u = new URL(cap.url);
         const source: ApiSource = {
           id: `api${++n}`, token: seal(replay), endpoint: `${cap.method} ${u.host}${u.pathname}`, jsonPath: set.path,
-          rows, total: findTotal(cap.payload), paginated: !!pagination, fields: profile(rows),
+          rows, total: pagination ? findTotal(cap.payload) : rows.length, paginated: !!pagination, fields: profile(rows),
         };
         apis.push(source);
         if (pagination) byEndpoint.set(key, source);

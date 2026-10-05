@@ -9,9 +9,10 @@ where the page shows 36), and what's on each item's own page: people with
 their designations, websites, emails, social links, descriptions. Tick fields,
 rename them, and export. Big exports run as resumable jobs.
 
-Measured on the Frankfurter Buchmesse exhibitor directory: all 4,043
-exhibitors plus every exhibitor's own page (team members, designations) in
-about 10 minutes, 4,742 rows, 1,423 named people, zero failed pages.
+The latest repair and verification results are recorded in
+[docs/verification-2026-10-05.md](docs/verification-2026-10-05.md).
+Site contents and response times change; successful local checks do not
+confirm that a separately deployed server is configured correctly.
 
 ```bash
 npm install
@@ -91,11 +92,15 @@ data/                exports from the original Buchmesse scrapes
 npm test                                   # offline self-checks for every engine module
 npm run test:live                          # scan a real page, detect, match, replay
 npx tsx tests/shots.ts                     # drive the UI (dev server running) and export
+npx tsx tests/verified-ui.ts output/proof  # actual UI: selected fields and all four formats
 ```
 
 ## Limits, plainly
 
 - Sites that block automated browsers, or render only into a canvas, won't work.
+- Field discovery is based on the page, its data feeds, and sampled item pages.
+  It cannot promise every field on every possible page. Use an example item
+  page when the automatic sample misses a field.
 - A column that exists only on the page (not in the site's data) fills just the
   rows that were on screen when you export "every page from the site's data".
   The tray marks these "on-screen only".

@@ -12,6 +12,10 @@ export class HttpError extends Error {
   }
 }
 
+export class ScanError extends Error {
+  constructor(message: string, public kind: "server" | "site") { super(message); }
+}
+
 async function post(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
   let res: Response;
   try {
@@ -31,7 +35,7 @@ async function post(path: string, body: unknown, signal?: AbortSignal): Promise<
       if (res.status === 504 || text.includes("FUNCTION_INVOCATION_TIMEOUT")) message = "The server took too long to answer.";
       else if (text.includes("FUNCTION_INVOCATION_FAILED")) message = "The server crashed while working on that. See the deployment's function logs.";
     }
-    throw new HttpError(message || `The server answered ${res.status}.`, res.status);
+    throw new HttpError(message || `Scrape Studio's server could not complete the request (HTTP ${res.status}).${res.status >= 500 ? " Check the application server logs; this is not a website login error." : ""}`, res.status);
   }
   return res;
 }
@@ -43,13 +47,13 @@ export interface ScanResult {
 export async function scanPage(url: string, cookie: string | undefined, onStatus: (s: string) => void, signal?: AbortSignal): Promise<ScanResult> {
   const res = await post("/api/scan", { url, cookie }, signal);
   let result: ScanResult | null = null;
-  let error: string | null = null;
+  let error: ScanError | null = null;
   await readNdjson(res, (e) => {
     if (e.type === "status") onStatus(String(e.text));
     else if (e.type === "result") result = e as unknown as ScanResult;
-    else if (e.type === "error") error = String(e.message);
+    else if (e.type === "error") error = new ScanError(String(e.message), e.kind === "site" ? "site" : "server");
   });
-  if (error) throw new Error(error);
+  if (error) throw error;
   if (!result) throw new Error("The scan ended without a result. Try again.");
   return result;
 }
@@ -102,7 +106,7 @@ export async function crawlPages(
   signal?: AbortSignal,
 ): Promise<{ pages: number; stoppedBy: string }> {
   const res = await post("/api/crawl", req, signal);
-  let summary = { pages: 0, stoppedBy: "end" };
+  let summary: { pages: number; stoppedBy: string } | null = null;
   let error: string | null = null;
   await readNdjson(res, (e) => {
     if (e.type === "rows") on.rows(e.rows as Row[], e.page as number);
@@ -111,6 +115,7 @@ export async function crawlPages(
     else if (e.type === "error") error = String(e.message);
   });
   if (error) throw new Error(error);
+  if (!summary) throw new Error("The connection dropped before page capture finished. Run the capture again.");
   return summary;
 }
 
@@ -157,6 +162,9 @@ export async function readItemBatch(
     const got = new Set(results.map((r) => r.url));
     pending = body.urls.filter((u) => !got.has(u));
     if (!results.length) throw new Error("The connection dropped");
+  }
+  if (!results.length && body.urls.length && pending.length === body.urls.length) {
+    throw new Error("No item pages were read in this attempt. Try again later.");
   }
   return { results, pending };
 }

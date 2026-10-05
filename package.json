@@ -5,14 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && node tests/trace-runtime.mjs",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/run.ts",
-    "test:live": "tsx tests/live.ts"
+    "test": "tsx tests/run.ts && tsx tests/regressions.ts",
+    "test:live": "tsx tests/live.ts",
+    "test:deployment": "node tests/trace-runtime.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   },
   "dependencies": {
     "@sparticuz/chromium": "^153.0.0",
