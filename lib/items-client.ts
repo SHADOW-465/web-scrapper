@@ -187,6 +187,9 @@ export function urlsFor(source: ItemSource | undefined, list: PageList | undefin
   const col = source.columnKey && list ? list.columns.find((c) => c.key === source.columnKey) : undefined;
   return raw.map((r, i) => {
     if (fromFeed && source.key && source.pattern) return fillPattern(source.pattern, r[source.key]) || undefined;
+    // Crawled rows carry their own link. The snapshot's column values cover
+    // only the first page and cannot identify later (or reordered) rows.
+    if (!fromFeed && typeof r["__url"] === "string") return r["__url"] || undefined;
     if (!fromFeed && col) return col.values[i] || undefined;
     if (source.key && source.pattern && r[source.key] != null) return fillPattern(source.pattern, r[source.key]) || undefined;
     if (typeof r["__url"] === "string") return r["__url"] as string;

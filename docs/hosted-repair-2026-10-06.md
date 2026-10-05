@@ -20,6 +20,17 @@ too. The new build check imports all three external runtime packages from
 an isolated directory containing only traced files, and removes it afterward.
 The repaired isolated bundle imports successfully (708 dependency files).
 
-Cloud validation results will be recorded after the new deployment is ready.
+Commit `d807f11` was deployed successfully through the existing GitHub
+integration. Production then returned HTTP 400 for the private-address probe,
+and launched Chromium successfully for public pages. The quotes test exposed
+a second, independent blocker: `SCRAPE_SECRET` is absent in production.
+Vercel account sign-in is required to configure it and redeploy.
+
+The live browser successfully scanned Books to Scrape, discovered item-page
+fields, and captured 40 rows from two pages. That test also exposed a join
+bug: item links from the initial snapshot took precedence over each crawled
+row's own link. The fix prioritizes the captured link so later-page details
+can be read. A regression covers later pages and reordered rows.
+
 The original cloud runtime logs were not available during the initial
 diagnosis; the isolated test establishes the packaging defect independently.

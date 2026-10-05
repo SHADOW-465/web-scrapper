@@ -7,11 +7,18 @@ import { safeFetch } from "../lib/safe-fetch";
 import { crawlPages, scanPage, readItemBatch, HttpError } from "../lib/client-api";
 import { replayPages } from "../lib/replay";
 import { newJob, runJob } from "../lib/job";
-import { openFeedWorkspace } from "../lib/model";
+import { openFeedWorkspace, type PageList } from "../lib/model";
+import { urlsFor } from "../lib/items-client";
 
 const nativeFetch = globalThis.fetch;
 const originalPassword = process.env.APP_PASSWORD;
 try {
+  const firstPage = { columns: [{key:"link",values:["https://site.test/a","https://site.test/b"]}] } as PageList;
+  assert.deepEqual(urlsFor({columnKey:"link"}, firstPage, [
+    {__url:"https://site.test/b"}, {__url:"https://site.test/a"}, {__url:"https://site.test/c"}, {__url:""},
+  ], false), ["https://site.test/b","https://site.test/a","https://site.test/c",undefined]);
+  assert.deepEqual(urlsFor({columnKey:"link"}, firstPage, [{},{}], false), ["https://site.test/a","https://site.test/b"]);
+  console.log("pass item details follow each captured row across pages and reordered results");
   // Actual scan path: complete feeds, including fields first seen after row 80.
   const records = Array.from({ length: 125 }, (_, i) => ({ id: i, name: `Company ${i}`, ...(i === 124 ? { email: "last@example.test" } : {}) }));
   globalThis.fetch = async () => Response.json(records);
