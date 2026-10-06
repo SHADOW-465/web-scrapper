@@ -32,5 +32,14 @@ bug: item links from the initial snapshot took precedence over each crawled
 row's own link. The fix prioritizes the captured link so later-page details
 can be read. A regression covers later pages and reordered rows.
 
+Commit `39bbb05` deployed that join fix. A fresh hosted-browser test selected
+three columns (renamed Book, Price, and Name from each item's own page),
+captured two pages, and downloaded JSON, Excel, CSV, and PDF. Verification
+passed for 40 rows and all 40 item-page names. Excel and CSV exactly match
+JSON; every value appears in the two-page PDF. Files are retained locally
+under `output/hosted-verified-2026-10-06/` and are excluded from Git and uploads.
+The production data-feed path remains blocked on configuring SCRAPE_SECRET;
+do not interpret the page-capture test as proof that every path is ready.
+
 The original cloud runtime logs were not available during the initial
 diagnosis; the isolated test establishes the packaging defect independently.
