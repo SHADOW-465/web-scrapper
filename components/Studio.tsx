@@ -6,7 +6,7 @@ import { fetchChunk, LockedError, sampleItems, scanPage, ScanError, SkippedItems
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
 import { discoveryRequest, fillPattern, findItemSource, sourceFromPastedUrl, specFor, spread, widerRows } from "@/lib/items-client";
 import { deleteJob, failedItems, finalRows, loadJobs, newJob, progressOf, runJob, type Job, type Progress } from "@/lib/job";
-import { extraFields, listRowCount, matchList, pageOnly, visiblePageRows, type ItemSource, type Row, type Workspace } from "@/lib/model";
+import { extraFields, findDirectoryLinksInHtml, listRowCount, looksLikeNavigation, matchList, pageOnly, visiblePageRows, type DirectoryLink, type ItemSource, type Row, type Workspace } from "@/lib/model";
 import { deleteRecipe, loadRecipes, saveRecipe, type Recipe } from "@/lib/recipes";
 import { initial, reducer } from "@/lib/studio-state";
 import { Failed, Locked, Printing, Welcome } from "./Blank";
@@ -145,6 +145,7 @@ export default function Studio() {
           type: "ready",
           lists: (m.lists as never) ?? [],
           next: (m.next as never) ?? null,
+          directoryLinks: (m.directoryLinks as never) ?? [],
           prefer: r ? { itemSelector: r.itemSelector, columns: r.columns, feedEndpoint: r.feed?.endpoint, itemColumns: r.itemColumns } : undefined,
         });
         if (r) {
@@ -179,6 +180,18 @@ export default function Studio() {
   const ws = st.active ? st.ws[st.active] : undefined;
   const activeList = st.lists.find((l) => l.id === st.active);
   const feed = ws?.feedId ? st.feeds.find((f) => f.id === ws.feedId) : undefined;
+  const directoryLinks = useMemo<DirectoryLink[]>(() => {
+    const out: DirectoryLink[] = [];
+    const seen = new Set<string>();
+    for (const d of [...st.directoryLinks, ...(scan ? findDirectoryLinksInHtml(scan.snapshot, scan.finalUrl) : [])]) {
+      if (!d.url || seen.has(d.url)) continue;
+      seen.add(d.url);
+      out.push(d);
+    }
+    return out;
+  }, [st.directoryLinks, scan]);
+  const isNavigation = looksLikeNavigation(activeList);
+  const noListFound = !ws && (gotReady.current || layoutMissing);
 
   const listMatches = useMemo(
     () => Object.fromEntries(st.lists.map((l) => [l.id, st.ws[l.id]?.match ?? matchList(l, st.feeds)])),
@@ -436,6 +449,11 @@ export default function Studio() {
     void startScan(r.url);
   }
 
+  const followDirectoryLink = useCallback((targetUrl: string) => {
+    pending.current = null;
+    void startScan(targetUrl);
+  }, [startScan]);
+
   /* -------------------------------------------------------- render */
 
   const busy = run?.state === "running";
@@ -525,6 +543,10 @@ export default function Studio() {
               label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : hasItemCols ? "this page; item-page columns fill in when you export" : scope === "page" ? "this page" : "this page, before fetching the rest"}
               tableOnly={tableOnly}
               onToggleTableOnly={() => setTableOnly((v) => !v)}
+              noListFound={noListFound}
+              isNavigation={isNavigation}
+              directoryLinks={directoryLinks}
+              onFollowLink={followDirectoryLink}
             />
             <div className={`sheetbar${tableOnly ? " collapsed" : ""}`}>
               <span className="host">{hostOf(scan.finalUrl)}</span>
@@ -545,7 +567,22 @@ export default function Studio() {
               {jobCard}
               <section className="section">
                 <div className="section-head"><h2>Found on this page</h2></div>
-                <ListsFound lists={st.lists} otherFeeds={otherFeeds} active={st.active} totals={totals} counts={listCounts} onPick={(id) => dispatch({ type: "activate", id })} />
+                <ListsFound
+                  lists={st.lists}
+                  otherFeeds={otherFeeds}
+                  active={st.active}
+                  totals={totals}
+                  counts={listCounts}
+                  directoryLinks={directoryLinks}
+                  onPick={(id) => dispatch({ type: "activate", id })}
+                  onFollowLink={followDirectoryLink}
+                />
+                {isNavigation && (
+                  <p className="note warn" style={{ marginTop: 8 }}>
+                    <AlertTriangle size={14} aria-hidden="true" />
+                    <span>These rows look like site navigation rather than a company list.</span>
+                  </p>
+                )}
                 {layoutMissing && <p className="note warn" style={{ marginTop: 8 }}><AlertTriangle size={14} aria-hidden="true" />The page&rsquo;s layout couldn&rsquo;t be read, so only the site&rsquo;s data is shown.</p>}
                 {scan.notes.map((n) => <p key={n} className="note" style={{ marginTop: 8 }}>{n}</p>)}
               </section>

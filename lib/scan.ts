@@ -261,7 +261,7 @@ export async function scan(
 
       await within(page.addScriptTag({ content: extractorJs() }).then(() => undefined), 5_000, undefined);
       const shape = await within(page.evaluate(
-        "(() => { const l = window.__ss ? window.__ss.detect() : []; return { lists: l.length, rich: l.some((x) => x.count >= 5 && x.columns.length >= 2), text: document.body.innerText.length }; })()",
+        "(() => { const l = (window.__ss ? window.__ss.detect() : []).filter((x) => !x.nav && !x.chrome); return { lists: l.length, rich: l.some((x) => x.count >= 5 && x.columns.length >= 2), text: document.body.innerText.length }; })()",
       ) as Promise<{ lists: number; rich: boolean; text: number }>, 10_000, { lists: 0, rich: false, text: 0 });
       listCount = shape.lists;
       // Small lookup lists (countries, halls, filter options) load even when the

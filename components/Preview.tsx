@@ -1,9 +1,9 @@
 "use client";
 
-import { ChevronDown, ChevronUp, Table2 } from "lucide-react";
+import { AlertTriangle, ArrowRight, ChevronDown, ChevronUp, Table2 } from "lucide-react";
 import { useState } from "react";
 import { cell } from "@/lib/exporters";
-import type { Column, Row } from "@/lib/model";
+import type { Column, DirectoryLink, Row } from "@/lib/model";
 
 const SHOW = 60;
 
@@ -14,6 +14,10 @@ export default function Preview({
   label,
   tableOnly,
   onToggleTableOnly,
+  noListFound,
+  isNavigation,
+  directoryLinks,
+  onFollowLink,
 }: {
   columns: Column[];
   rows: Row[];
@@ -21,6 +25,10 @@ export default function Preview({
   label: string;
   tableOnly?: boolean;
   onToggleTableOnly?: () => void;
+  noListFound?: boolean;
+  isNavigation?: boolean;
+  directoryLinks?: DirectoryLink[];
+  onFollowLink?: (url: string) => void;
 }) {
   const [open, setOpen] = useState(true);
   const isOpen = open || !!tableOnly;
@@ -32,7 +40,9 @@ export default function Preview({
       <div className="preview-head">
         <h2>Results table</h2>
         <span className="aside">
-          {rows.length ? (
+          {noListFound ? (
+            "No company list found on this page"
+          ) : rows.length ? (
             shown === effectiveTotal ? (
               <><span className="num">{effectiveTotal.toLocaleString()}</span> {effectiveTotal === 1 ? "row" : "rows"}</>
             ) : (
@@ -40,7 +50,8 @@ export default function Preview({
             )
           ) : (
             "No rows yet"
-          )} · {label}
+          )}
+          {!noListFound ? ` · ${label}` : ""}
         </span>
         <span style={{ marginLeft: "auto" }} />
         {onToggleTableOnly && (
@@ -62,7 +73,45 @@ export default function Preview({
       </div>
       {isOpen && (
         <div className="preview-body">
-          {on.length === 0 ? (
+          {isNavigation && (
+            <div className="note warn" role="status" style={{ padding: "10px 14px", borderBottom: "1px solid var(--rule)", background: "var(--chrome)" }}>
+              <AlertTriangle size={15} aria-hidden="true" />
+              <div>
+                <b>These rows look like site navigation links, not a company list.</b>
+                {directoryLinks && directoryLinks.length > 0 && onFollowLink && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
+                    {directoryLinks.map((d) => (
+                      <button key={d.url} type="button" className="btn btn-primary btn-sm" onClick={() => onFollowLink(d.url)}>
+                        <span>{d.label}</span>
+                        <ArrowRight size={14} aria-hidden="true" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {noListFound ? (
+            <div style={{ padding: "22px 18px" }}>
+              <p className="note warn" style={{ fontSize: 14, fontWeight: 600 }}>
+                <AlertTriangle size={16} aria-hidden="true" />
+                <span>No company list found on this page.</span>
+              </p>
+              <p style={{ margin: "6px 0 12px", color: "var(--graphite-2)", fontSize: 13.5 }}>
+                This page does not contain a directory table or repeating company cards of its own. Make sure you are on the directory listing page, or click a company on the page preview below to mark it manually.
+              </p>
+              {directoryLinks && directoryLinks.length > 0 && onFollowLink && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 10 }}>
+                  {directoryLinks.map((d) => (
+                    <button key={d.url} type="button" className="btn btn-primary" onClick={() => onFollowLink(d.url)}>
+                      <span>{d.label}</span>
+                      <ArrowRight size={15} aria-hidden="true" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : on.length === 0 ? (
             <p className="note" style={{ padding: 14 }}>Mark at least one column on the page, or switch one on in the right panel.</p>
           ) : (
             <table className="grid">

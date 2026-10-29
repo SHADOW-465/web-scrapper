@@ -4,8 +4,8 @@
  * they always act on current state, never on a stale closure.
  */
 import {
-  addFeedColumn, addPageColumn, matchList, nextInk, openFeedWorkspace, openWorkspace, uniqueNames,
-  type Column, type Feed, type FeedField, type ItemsInfo, type PageColumn, type PageList, type Workspace,
+  addFeedColumn, addPageColumn, looksLikeNavigation, matchList, nextInk, openFeedWorkspace, openWorkspace, uniqueNames,
+  type Column, type DirectoryLink, type Feed, type FeedField, type ItemsInfo, type PageColumn, type PageList, type Workspace,
 } from "./model";
 import type { RecipeColumn } from "./recipes";
 
@@ -15,17 +15,18 @@ export interface State {
   feeds: Feed[];
   lists: PageList[];
   next: NextControl | null;
+  directoryLinks: DirectoryLink[];
   ws: Record<string, Workspace>;
   active: string | null;
   fresh: string | null; // page key of the column just inked, for the swipe
   preferItems: Array<{ key: string; name: string }> | null; // from a recipe, applied when item fields arrive
 }
 
-export const initial: State = { feeds: [], lists: [], next: null, ws: {}, active: null, fresh: null, preferItems: null };
+export const initial: State = { feeds: [], lists: [], next: null, directoryLinks: [], ws: {}, active: null, fresh: null, preferItems: null };
 
 export type Action =
   | { type: "scanned"; feeds: Feed[] }
-  | { type: "ready"; lists: PageList[]; next: NextControl | null; prefer?: { itemSelector?: string; columns?: RecipeColumn[]; feedEndpoint?: string; itemColumns?: Array<{ key: string; name: string }> } }
+  | { type: "ready"; lists: PageList[]; next: NextControl | null; directoryLinks?: DirectoryLink[]; prefer?: { itemSelector?: string; columns?: RecipeColumn[]; feedEndpoint?: string; itemColumns?: Array<{ key: string; name: string }> } }
   | { type: "items"; wsId: string; items: ItemsInfo; reset?: boolean }
   | { type: "pick"; listId: string; created?: PageList | null; column?: PageColumn; remove?: string }
   | { type: "activate"; id: string }
@@ -73,6 +74,7 @@ export function reducer(s: State, a: Action): State {
       return { ...initial, feeds: a.feeds };
     case "ready": {
       const lists = a.lists;
+      const directoryLinks = a.directoryLinks ?? [];
       let active: string | null = null;
       const ws: Record<string, Workspace> = {};
       const pinned = a.prefer?.itemSelector ? lists.find((l) => l.itemSelector === a.prefer!.itemSelector) : undefined;
@@ -93,11 +95,9 @@ export function reducer(s: State, a: Action): State {
         const page = size(f) / Math.max(1, l.count);
         return covered >= 0.5 && page <= 4 ? Math.max(size(f), l.count) : l.count;
       };
-      // The main list is the one carrying the most information, not merely the
-      // most rows: a 50-link category sidebar is not the 20 books beside it.
-      // The engine's own score weighs rows, text, fields and area together.
-      const real = [...lists].filter((l) => !l.manual);
-      const richest = [...real].sort((x, y) => y.score - x.score)[0];
+      // Never auto-pick site navigation menus as the page's dataset.
+      const real = [...lists].filter((l) => !l.manual && !looksLikeNavigation(l));
+      const richest = [...real].sort((x, y) => y.score - aScore(x))[0];
       const furthest = [...real].sort((x, y) => reach(y) - reach(x))[0];
       const bestList = richest && furthest && reach(furthest) >= 3 * reach(richest) ? furthest : richest;
       const open = (id: string, w: Workspace) => {
@@ -110,7 +110,7 @@ export function reducer(s: State, a: Action): State {
       else if (richFeed && (!bestList || size(richFeed) >= 3 * reach(bestList))) open(`feed:${richFeed.id}`, openFeedWorkspace(richFeed));
       else if (bestList) open(bestList.id, openWorkspace(bestList, s.feeds));
       else if (richFeed) open(`feed:${richFeed.id}`, openFeedWorkspace(richFeed));
-      return { ...s, lists, next: a.next, ws, active, fresh: null, preferItems: a.prefer?.itemColumns ?? null };
+      return { ...s, lists, next: a.next, directoryLinks, ws, active, fresh: null, preferItems: a.prefer?.itemColumns ?? null };
     }
     case "items": {
       const w0 = s.ws[a.wsId];
@@ -180,6 +180,10 @@ export function reducer(s: State, a: Action): State {
     case "addFeedField":
       return updateActive(s, (w) => addFeedColumn(w, a.field));
   }
+}
+
+function aScore(l: PageList): number {
+  return l.score;
 }
 
 /** The feed most likely to be the page's main dataset when nothing on screen matched. */

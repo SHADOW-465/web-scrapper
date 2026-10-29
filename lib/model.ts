@@ -8,7 +8,8 @@ import { humanizeKey } from "./records";
 export const INKS = ["#f7e733", "#ff6fae", "#7ded6f", "#62ccff", "#ffab4a", "#c79bff", "#5ff2d4", "#ff8a7a"];
 
 export interface PageColumn { key: string; sel: string; attr: string; multi?: boolean; name: string; values: string[]; fill: number }
-export interface PageList { id: string; name: string; count: number; itemSelector: string; columns: PageColumn[]; score: number; manual: boolean }
+export interface PageList { id: string; name: string; count: number; itemSelector: string; columns: PageColumn[]; score: number; manual: boolean; chrome?: boolean; nav?: boolean }
+export interface DirectoryLink { label: string; url: string }
 
 export interface FeedField { key: string; label: string; sample: string; fill: number; plumbing: boolean }
 export interface Feed {
@@ -62,6 +63,60 @@ export interface Workspace {
 }
 
 const GENERIC = /^(text|title|link|image|number)( \d+)?$/i;
+const NAV_WORDS = /^(home|visit|visitors?|exhibit|exhibitors?|press|news|media|about|about us|contact|contact us|login|log in|sign in|register|search|events?|programme|program|calendar|tickets?|tickets?\s*&\s*prices?|prices?|pricing|services?|faq|help|imprint|impressum|privacy|privacy policy|terms|careers?|jobs?|blog|shop|store|partners?|de|en|fr|es|besuchen|ausstellen|aussteller|presse|kontakt|über uns|anmelden|tickets?\s*&\s*preise|hallenplan|service|agb|datenschutz)$/i;
+const DIR_TEXT = /\b(open|go to|view|search|browse|explore|show|see|find|launch|to the|zum|zur)\s+(the\s+)?(exhibitor|company|vendor|publisher|member|participant|speaker)s?\s*(directory|list|search|catalogue|catalog|database|marketplace|finder|overview|verzeichnis|suche|liste|katalog)?\b|\b(exhibitor|company|vendor|publisher|member|participant)\s+(directory|search|database|catalogue|catalog|marketplace|finder)\b|\b(ausstellerverzeichnis|ausstellersuche|ausstellerkatalog|firmenverzeichnis)\b/i;
+const DIR_HREF = /\/(marketplace\/)?(exhibitors?|exhibitor-directory|exhibitor-search|company-directory|companies)(\/|\?|$)/i;
+
+/** Whether a detected list looks like site navigation (menus, headers, footers) rather than a company/data list. */
+export function looksLikeNavigation(list: PageList | undefined): boolean {
+  if (!list) return false;
+  if (list.nav || list.chrome) return true;
+  if (/\b(nav|menu|header|footer|breadcrumb)\b/i.test(list.itemSelector)) return true;
+  const cols = list.columns;
+  if (!cols.length || cols.length > 2) return false;
+  const textCols = cols.filter((c) => c.attr === "own" || c.attr === "text");
+  const linkCols = cols.filter((c) => c.attr === "href");
+  if (textCols.length !== 1 || textCols.length + linkCols.length !== cols.length) return false;
+  const vals = textCols[0].values.map((v) => v.trim()).filter(Boolean);
+  if (!vals.length) return false;
+  const avg = vals.reduce((a, v) => a + v.length, 0) / vals.length;
+  const navHits = vals.filter((v) => NAV_WORDS.test(v)).length;
+  return avg <= 26 && vals.every((v) => v.length <= 55) && (navHits >= Math.max(2, Math.ceil(vals.length * 0.3)) || (linkCols.length === 1 && avg <= 18));
+}
+
+/** Detect links on a landing page (such as "Open exhibitor directory") that lead to the actual directory. */
+export function findDirectoryLinksInHtml(html: string, baseUrl: string): DirectoryLink[] {
+  if (!html) return [];
+  const here = baseUrl.split("#")[0];
+  const out: Array<DirectoryLink & { priority: number }> = [];
+  const seen = new Set<string>();
+  const re = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const attrs = m[1];
+    const hrefMatch = attrs.match(/\bhref=["']([^"']+)["']/i);
+    if (!hrefMatch) continue;
+    const rawHref = hrefMatch[1].trim();
+    if (!rawHref || /^(#|javascript:|mailto:|tel:)/i.test(rawHref)) continue;
+    let url = "";
+    try {
+      url = new URL(rawHref, baseUrl).href;
+    } catch {
+      continue;
+    }
+    if (!/^https?:/i.test(url) || url.split("#")[0] === here || seen.has(url)) continue;
+    const titleAttr = attrs.match(/\b(?:title|aria-label)=["']([^"']+)["']/i)?.[1] ?? "";
+    const innerText = m[2].replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/[→›»>←‹«<]+/g, " ").replace(/\s+/g, " ").trim();
+    const text = innerText || titleAttr.trim();
+    const textHit = DIR_TEXT.test(text);
+    const hrefHit = DIR_HREF.test(url);
+    if (!textHit && !hrefHit) continue;
+    seen.add(url);
+    const label = text && text.length <= 70 ? text : "Open exhibitor directory";
+    out.push({ label, url, priority: textHit ? 2 : 1 });
+  }
+  return out.sort((a, b) => b.priority - a.priority).slice(0, 4).map(({ label, url }) => ({ label, url }));
+}
 
 /** A name for a column: what the page calls it, unless the feed knows better. */
 function bestName(pageName: string | undefined, feedKey: string | undefined): string {
@@ -307,6 +362,22 @@ export function selfCheck(): string {
   const paddedWs = openWorkspace(paddedList, []);
   if (visiblePageRows(paddedWs, paddedList, undefined).length !== 3) throw new Error("visiblePageRows should exclude empty 4th slot");
   if (listRowCount(paddedList, paddedWs) !== 3 || listRowCount(paddedList) !== 3) throw new Error("listRowCount should match visiblePageRows (3)");
+
+  // Navigation list & directory link detection.
+  const navList: PageList = {
+    id: "l-nav", name: "Navigation", count: 4, itemSelector: "header > ul > li", score: 1, manual: false,
+    columns: [
+      { key: "a@own", sel: "a", attr: "own", name: "Title", values: ["Visit", "Exhibit", "Press", "Contact"], fill: 1 },
+      { key: "a@href", sel: "a", attr: "href", name: "Link", values: ["https://b.test/visit", "https://b.test/exhibit", "https://b.test/press", "https://b.test/contact"], fill: 1 },
+    ],
+  };
+  if (!looksLikeNavigation(navList)) throw new Error("navList should be flagged as navigation");
+  if (looksLikeNavigation(list)) throw new Error("quotes list should not be flagged as navigation");
+  const dirLinks = findDirectoryLinksInHtml(
+    `<html><body><a href="https://event.buchmesse.de/en/marketplace/exhibitors">Open exhibitor directory</a></body></html>`,
+    "https://www.buchmesse.de/en/visit/exhibitor-directory",
+  );
+  if (dirLinks.length !== 1 || dirLinks[0].label !== "Open exhibitor directory") throw new Error(`directory links wrong: ${JSON.stringify(dirLinks)}`);
 
   const noisy: Feed = {
     id: "api9", token: "t", endpoint: "GET x/y", jsonPath: "l", total: 9, paginated: true,

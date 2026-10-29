@@ -1,9 +1,9 @@
 "use client";
 
-import { ChevronRight, Database, ExternalLink, Eye, FileText, GripVertical, Loader2, Plus, RotateCcw, ScanLine, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowRight, ChevronRight, Database, ExternalLink, Eye, FileText, GripVertical, Loader2, Plus, RotateCcw, ScanLine, Sparkles } from "lucide-react";
 import { useState } from "react";
-import type { Column, Feed, FeedField, PageList, Workspace } from "@/lib/model";
-import { feedTitle } from "@/lib/model";
+import type { Column, DirectoryLink, Feed, FeedField, PageList, Workspace } from "@/lib/model";
+import { feedTitle, looksLikeNavigation } from "@/lib/model";
 import type { NextControl } from "@/lib/studio-state";
 
 const fmt = (n: number) => n.toLocaleString();
@@ -19,18 +19,14 @@ export function ListsFound(props: {
   active: string | null;
   totals: Record<string, number | "many" | null>;
   counts?: Record<string, number>;
+  directoryLinks?: DirectoryLink[];
+  onFollowLink?: (url: string) => void;
   onPick: (id: string) => void;
 }) {
-  const { lists, otherFeeds, active, totals, counts, onPick } = props;
+  const { lists, otherFeeds, active, totals, counts, directoryLinks, onFollowLink, onPick } = props;
   const rowCountOf = (l: PageList) => counts?.[l.id] ?? l.count;
-  if (!lists.length && !otherFeeds.length) {
-    return (
-      <p className="note">
-        <ScanLine size={15} aria-hidden="true" />
-        No repeating list found. Click anything on the page to capture it.
-      </p>
-    );
-  }
+  const dataLists = lists.filter((l) => !looksLikeNavigation(l));
+  const navLists = lists.filter((l) => looksLikeNavigation(l));
 
   const size = (f: Feed) => f.total ?? f.rows.length;
   const primaryFeeds = otherFeeds
@@ -46,8 +42,61 @@ export function ListsFound(props: {
     return `${l.name} · ${fmt(rowCountOf(l))} items`;
   };
 
+  const renderListRow = (l: PageList, isNav: boolean) => {
+    const t = totals[l.id];
+    return (
+      <button key={l.id} role="listitem" className="listrow" aria-pressed={active === l.id} onClick={() => onPick(l.id)}>
+        <span style={{ minWidth: 0 }}>
+          <span className="lname"><span>{label(l)}</span></span>
+          <span className="lmeta">
+            {l.columns.slice(0, 3).map((c) => c.values.find(Boolean)).filter(Boolean).join(" · ") || `${l.columns.length} fields`}
+          </span>
+        </span>
+        <span style={{ display: "grid", justifyItems: "end", gap: 3 }}>
+          <span className="count"><span className="num">{fmt(rowCountOf(l))}</span> on page</span>
+          {isNav ? (
+            <span className="badge" style={{ color: "#7a4a00", borderColor: "#e2c08d" }}>Menu / nav</span>
+          ) : t ? (
+            <span className="badge badge-feed"><Database size={11} aria-hidden="true" />{t === "many" ? "every page" : <><span className="num">{fmt(t)}</span> total</>}</span>
+          ) : null}
+        </span>
+      </button>
+    );
+  };
+
   return (
     <>
+      {!dataLists.length && !otherFeeds.length && (
+        <div style={{ marginBottom: 10 }}>
+          <p className="note warn">
+            <ScanLine size={15} aria-hidden="true" />
+            <span>No company list found on this page.</span>
+          </p>
+          {directoryLinks && directoryLinks.length > 0 && onFollowLink && (
+            <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+              <span style={{ fontSize: 12.5, color: "var(--graphite-2)" }}>Follow a directory link found on this page:</span>
+              {directoryLinks.map((d) => (
+                <button key={d.url} type="button" className="btn btn-primary btn-sm" style={{ justifyContent: "space-between" }} onClick={() => onFollowLink(d.url)}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{d.label}</span>
+                  <ArrowRight size={14} aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      { (dataLists.length > 0 || otherFeeds.length > 0) && directoryLinks && directoryLinks.length > 0 && onFollowLink && (
+        <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+          {directoryLinks.map((d) => (
+            <button key={d.url} type="button" className="btn btn-quiet btn-sm" style={{ justifyContent: "space-between" }} onClick={() => onFollowLink(d.url)}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{d.label}</span>
+              <ArrowRight size={13} aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+      )}
+
       {primaryFeeds.length > 0 && (
         <div className="lists" role="list" style={{ marginBottom: 12 }}>
           {primaryFeeds.map((f) => (
@@ -90,27 +139,11 @@ export function ListsFound(props: {
         </div>
       )}
 
-      {lists.length > 0 && (
+      {dataLists.length > 0 && (
         <>
           {primaryFeeds.length > 0 && <div className="subhead">On-screen page lists</div>}
           <div className="lists" role="list">
-            {lists.map((l) => {
-              const t = totals[l.id];
-              return (
-                <button key={l.id} role="listitem" className="listrow" aria-pressed={active === l.id} onClick={() => onPick(l.id)}>
-                  <span style={{ minWidth: 0 }}>
-                    <span className="lname"><span>{label(l)}</span></span>
-                    <span className="lmeta">
-                      {l.columns.slice(0, 3).map((c) => c.values.find(Boolean)).filter(Boolean).join(" · ") || `${l.columns.length} fields`}
-                    </span>
-                  </span>
-                  <span style={{ display: "grid", justifyItems: "end", gap: 3 }}>
-                    <span className="count"><span className="num">{fmt(rowCountOf(l))}</span> on page</span>
-                    {t ? <span className="badge badge-feed"><Database size={11} aria-hidden="true" />{t === "many" ? "every page" : <><span className="num">{fmt(t)}</span> total</>}</span> : null}
-                  </span>
-                </button>
-              );
-            })}
+            {dataLists.map((l) => renderListRow(l, false))}
           </div>
         </>
       )}
@@ -130,6 +163,19 @@ export function ListsFound(props: {
             ))}
           </div>
         </>
+      )}
+
+      {navLists.length > 0 && (
+        <details className="extra" open={navLists.some((l) => l.id === active)}>
+          <summary><ChevronRight size={14} aria-hidden="true" />Site navigation menus ({navLists.length})</summary>
+          <p className="note warn" style={{ margin: "4px 0 6px" }}>
+            <AlertTriangle size={13} aria-hidden="true" />
+            <span>These look like site navigation links, not a company list.</span>
+          </p>
+          <div className="lists" role="list">
+            {navLists.map((l) => renderListRow(l, true))}
+          </div>
+        </details>
       )}
     </>
   );
