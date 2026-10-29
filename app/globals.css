@@ -395,7 +395,7 @@ input.mini[type="number"] { width: 68px; font-family: var(--font-mono); }
 table.grid { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; font-size: 13px; }
 table.grid th, table.grid td {
   text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--chrome);
-  max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top;
+  max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top;
 }
 table.grid th {
   position: sticky; top: 0; background: var(--paper); z-index: 1;

@@ -61,6 +61,7 @@ export interface ItemResult {
   url: string;
   ok: boolean;
   error?: string;
+  title?: string;
   values?: Record<string, string>;
   lists?: Record<string, Array<Record<string, string>>>;
 }
@@ -69,12 +70,30 @@ export interface ItemResult {
 
 const clean = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
 
+function expandTruncatedText(el: Element, t: string): string {
+  if (!t) return t;
+  const candidates: Array<Element | null> = [el];
+  if (el.parentElement && el.parentElement.children.length === 1) candidates.push(el.parentElement);
+  if (el.children.length === 1) candidates.push(el.children[0]);
+  const hasEllipsis = /(\.{2,}|…)\s*$/.test(t);
+  const prefix = t.replace(/(\.{2,}|…)\s*$/, "").trim();
+  for (const node of candidates) {
+    if (!node) continue;
+    const raw = node.getAttribute("title") || node.getAttribute("data-title") || node.getAttribute("data-full-text") || (hasEllipsis ? node.getAttribute("aria-label") : "");
+    const full = clean(raw);
+    if (!full || full.length <= prefix.length) continue;
+    if (hasEllipsis && prefix.length >= 2 && full.toLowerCase().startsWith(prefix.toLowerCase())) return full;
+    if (!hasEllipsis && t.length >= 6 && full.length > t.length && full.toLowerCase().startsWith(t.toLowerCase())) return full;
+  }
+  return t;
+}
+
 function ownText(el: Element): string {
   let t = "";
   el.childNodes.forEach((n) => {
     if (n.nodeType === 3) t += n.nodeValue ?? "";
   });
-  return clean(t);
+  return expandTruncatedText(el, clean(t));
 }
 
 function readValue(el: Element | null, attr: string, base: string): string {
@@ -98,8 +117,8 @@ function readValue(el: Element | null, attr: string, base: string): string {
       return s;
     }
   }
-  if (attr === "own") return ownText(el) || (el.children.length ? "" : clean(el.textContent));
-  return clean(el.textContent);
+  if (attr === "own") return ownText(el) || (el.children.length ? "" : expandTruncatedText(el, clean(el.textContent)));
+  return expandTruncatedText(el, clean(el.textContent));
 }
 
 /**
@@ -134,13 +153,14 @@ function queryAll(root: Element, sel: string): Element[] {
 }
 
 /** Apply an item spec to a page's plain HTML. */
-export function extractStatic(html: string, url: string, spec: ItemSpec): Pick<ItemResult, "values" | "lists"> {
+export function extractStatic(html: string, url: string, spec: ItemSpec): Pick<ItemResult, "values" | "lists" | "title"> {
   const { document } = parseHTML(html);
   const values: Record<string, string> = {};
   for (const f of spec.fields) {
     if (f.listId) continue;
     values[f.key] = readValue(one(document, f.sel), f.attr, url);
   }
+  const h1 = clean(one(document, "h1")?.textContent) || clean(one(document, "title")?.textContent)?.split(/\s*[|–—-]\s*/)[0] || "";
   const lists: Record<string, Array<Record<string, string>>> = {};
   for (const l of spec.lists) {
     const items = many(document, l.itemSelector);
@@ -152,7 +172,7 @@ export function extractStatic(html: string, url: string, spec: ItemSpec): Pick<I
       ])))
       .filter((r) => Object.values(r).some(Boolean));
   }
-  return { values, lists };
+  return h1 ? { values, lists, title: h1 } : { values, lists };
 }
 
 /* ------------------------------------------------------------ finding item pages */
@@ -597,5 +617,9 @@ export function selfCheck(): string {
   const pats = candidatePatterns("https://e.test", ["/api/v1/search/exhibitors", "/en/marketplace/exhibitors"]);
   if (pats[0] !== "https://e.test/exhibitor/{v}") throw new Error(`pattern order wrong: ${pats[0]}`);
   if (!pats.includes("https://e.test/en/exhibitor/{v}")) throw new Error("locale pattern missing");
+  const trunc = extractStatic(`<html><body><h3><a href="/b/1" title="A Light in the Attic">A Light in the ...</a></h3></body></html>`, "https://b.test/", {
+    mode: "static", lists: [], fields: [{ key: "t", sel: "body > h3 > a", attr: "own" }],
+  });
+  if (trunc.values?.t !== "A Light in the Attic") throw new Error(`title attribute truncation expansion failed: ${JSON.stringify(trunc.values)}`);
   return "items ok";
 }

@@ -9,6 +9,7 @@ export interface ItemResult {
   url: string;
   ok: boolean;
   error?: string;
+  title?: string;
   values?: Record<string, string>;
   lists?: Record<string, Array<Record<string, string>>>;
 }
@@ -215,14 +216,36 @@ export function specFor(ws: Workspace): ItemSpec | null {
  * item page (team members), each list entry becomes its own row, with the
  * row's other columns repeated, as in the original Buchmesse spreadsheets.
  */
+function expandRowFromDetail(row: Row, res: ItemResult | undefined): Row {
+  if (!res) return row;
+  const candidates = [res.title, ...Object.values(res.values ?? {})].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  if (!candidates.length) return row;
+  let changed = false;
+  const next: Row = { ...row };
+  for (const [k, v] of Object.entries(row)) {
+    if (typeof v !== "string" || !/(\.{2,}|…)\s*$/.test(v)) continue;
+    const prefix = v.replace(/(\.{2,}|…)\s*$/, "").trim();
+    if (prefix.length < 3) continue;
+    const match = candidates.find((c) => c.length > prefix.length && c.toLowerCase().startsWith(prefix.toLowerCase()));
+    if (match) {
+      next[k] = match;
+      changed = true;
+    }
+  }
+  return changed ? next : row;
+}
+
 export function assemble(base: Row[], urls: Array<string | undefined>, columns: Column[], results: Record<string, ItemResult>): Row[] {
   const itemCols = columns.filter((c) => c.on && c.item);
-  if (!itemCols.length) return base;
+  if (!itemCols.length) {
+    return Object.keys(results).length ? base.map((r, i) => expandRowFromDetail(r, urls[i] ? results[urls[i]!] : undefined)) : base;
+  }
   const expandList = itemCols.find((c) => c.item!.listId)?.item!.listId;
   const out: Row[] = [];
-  base.forEach((row, i) => {
+  base.forEach((rawRow, i) => {
     const url = urls[i];
     const res = url ? results[url] : undefined;
+    const row = expandRowFromDetail(rawRow, res);
     const singles: Row = {};
     for (const c of itemCols) {
       const it = c.item!;
@@ -267,5 +290,12 @@ export function selfCheck(): string {
   if (rows[1].Person !== "Ben" || rows[1].Company !== "Acme" || rows[1].Website !== "https://acme.test") throw new Error(`expansion wrong ${JSON.stringify(rows[1])}`);
   if (rows[2].Company !== "Solo" || rows[2].Person !== "") throw new Error("row without members lost");
   if (Object.keys(rows[0]).join() !== "Company,Person,Designation,Website") throw new Error("column order lost");
+  const detrunc = assemble(
+    [{ Title: "A Light in the ..." }],
+    ["u-book"],
+    [{ id: "t", name: "Title", ink: "", on: true, sample: "" }],
+    { "u-book": { url: "u-book", ok: true, title: "A Light in the Attic", values: {} } },
+  );
+  if (detrunc[0].Title !== "A Light in the Attic") throw new Error(`detail page de-truncation failed: ${JSON.stringify(detrunc)}`);
   return "items-client ok";
 }
