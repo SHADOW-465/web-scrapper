@@ -1,31 +1,59 @@
 "use client";
 
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Table2 } from "lucide-react";
 import { useState } from "react";
 import { cell } from "@/lib/exporters";
 import type { Column, Row } from "@/lib/model";
 
 const SHOW = 60;
 
-export default function Preview({ columns, rows, total, label }: { columns: Column[]; rows: Row[]; total: number; label: string }) {
+export default function Preview({
+  columns,
+  rows,
+  total,
+  label,
+  tableOnly,
+  onToggleTableOnly,
+}: {
+  columns: Column[];
+  rows: Row[];
+  total: number;
+  label: string;
+  tableOnly?: boolean;
+  onToggleTableOnly?: () => void;
+}) {
   const [open, setOpen] = useState(true);
+  const isOpen = open || !!tableOnly;
   const on = columns.filter((c) => c.on);
   return (
-    <section className={`preview${open ? "" : " collapsed"}`} aria-label="Preview">
+    <section className={`preview${isOpen ? "" : " collapsed"}${tableOnly ? " full" : ""}`} aria-label="Results table">
       <div className="preview-head">
-        <h2>Preview</h2>
+        <h2>Results table</h2>
         <span className="aside">
           {rows.length ? <><span className="num">{Math.min(rows.length, SHOW).toLocaleString()}</span> of <span className="num">{total.toLocaleString()}</span> rows</> : "No rows yet"} · {label}
         </span>
         <span style={{ marginLeft: "auto" }} />
-        <button className="iconbtn" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={open ? "Collapse preview" : "Expand preview"}>
-          {open ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
-        </button>
+        {onToggleTableOnly && (
+          <button
+            type="button"
+            className={`btn btn-quiet btn-sm table-only-toggle${tableOnly ? " on" : ""}`}
+            aria-pressed={!!tableOnly}
+            onClick={onToggleTableOnly}
+          >
+            <Table2 size={14} aria-hidden="true" />
+            <span>Table only</span>
+          </button>
+        )}
+        {!tableOnly && (
+          <button className="iconbtn" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={open ? "Collapse results table" : "Expand results table"}>
+            {open ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+          </button>
+        )}
       </div>
-      {open && (
+      {isOpen && (
         <div className="preview-body">
           {on.length === 0 ? (
-            <p className="note" style={{ padding: 14 }}>Mark at least one column on the page, or switch one on in the tray.</p>
+            <p className="note" style={{ padding: 14 }}>Mark at least one column on the page, or switch one on in the right panel.</p>
           ) : (
             <table className="grid">
               <thead>

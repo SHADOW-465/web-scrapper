@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, ArrowRight, Bookmark, BookmarkPlus, Check, Download, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Bookmark, BookmarkPlus, Check, Download, EyeOff, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { fetchChunk, LockedError, sampleItems, scanPage, ScanError, SkippedItemsError, unlock, type CrawlRequest, type ScanResult } from "@/lib/client-api";
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
@@ -63,6 +63,7 @@ export default function Studio() {
   const [saving, setSaving] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [layoutMissing, setLayoutMissing] = useState(false);
+  const [tableOnly, setTableOnly] = useState(false);
 
   const sheet = useRef<SheetHandle>(null);
   const abort = useRef<AbortController | null>(null);
@@ -508,18 +509,26 @@ export default function Studio() {
       {phase === "ready" && scan && (
         <div className="work">
           <div className="deskcol">
-            <div className="sheetbar">
+            <Preview
+              columns={ws?.columns ?? []}
+              rows={rows}
+              total={runMatches && run?.state === "done" ? rows.length : expectedRows ?? rows.length}
+              label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : hasItemCols ? "this page; item-page columns fill in when you export" : scope === "page" ? "this page" : "this page, before fetching the rest"}
+              tableOnly={tableOnly}
+              onToggleTableOnly={() => setTableOnly((v) => !v)}
+            />
+            <div className={`sheetbar${tableOnly ? " collapsed" : ""}`}>
               <span className="host">{hostOf(scan.finalUrl)}</span>
               <span className="title">{scan.title}</span>
               <span className="hint"><MousePointerClick size={14} aria-hidden="true" />Click anything on the page to add it as a column</span>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setTableOnly(true)} title="Hide the website preview">
+                <EyeOff size={13} aria-hidden="true" />
+                <span>Hide preview</span>
+              </button>
             </div>
-            <div className="desk">
+            <div className={`desk${tableOnly ? " collapsed" : ""}`}>
               <Sheet ref={sheet} html={scan.snapshot} title={scan.title} />
             </div>
-            {ws && (
-              <Preview columns={ws.columns} rows={rows} total={runMatches && run?.state === "done" ? rows.length : expectedRows ?? rows.length}
-                label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : hasItemCols ? "this page; item-page columns fill in when you export" : scope === "page" ? "this page" : "this page, before fetching the rest"} />
-            )}
           </div>
 
           <aside className="tray" aria-label="Extraction settings">
