@@ -18,9 +18,11 @@ export function ListsFound(props: {
   otherFeeds: Feed[];
   active: string | null;
   totals: Record<string, number | "many" | null>;
+  counts?: Record<string, number>;
   onPick: (id: string) => void;
 }) {
-  const { lists, otherFeeds, active, totals, onPick } = props;
+  const { lists, otherFeeds, active, totals, counts, onPick } = props;
+  const rowCountOf = (l: PageList) => counts?.[l.id] ?? l.count;
   if (!lists.length && !otherFeeds.length) {
     return (
       <p className="note">
@@ -41,7 +43,7 @@ export function ListsFound(props: {
   lists.forEach((l) => names.set(l.name, (names.get(l.name) ?? 0) + 1));
   const label = (l: PageList) => {
     if ((names.get(l.name) ?? 0) < 2) return l.name;
-    return `${l.name} · ${fmt(l.count)} items`;
+    return `${l.name} · ${fmt(rowCountOf(l))} items`;
   };
 
   return (
@@ -103,7 +105,7 @@ export function ListsFound(props: {
                     </span>
                   </span>
                   <span style={{ display: "grid", justifyItems: "end", gap: 3 }}>
-                    <span className="count"><span className="num">{fmt(l.count)}</span> on page</span>
+                    <span className="count"><span className="num">{fmt(rowCountOf(l))}</span> on page</span>
                     {t ? <span className="badge badge-feed"><Database size={11} aria-hidden="true" />{t === "many" ? "every page" : <><span className="num">{fmt(t)}</span> total</>}</span> : null}
                   </span>
                 </button>

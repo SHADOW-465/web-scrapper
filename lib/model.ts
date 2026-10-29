@@ -218,6 +218,24 @@ export function hasPageContent(ws: Workspace): (r: Row) => boolean {
   return (r) => !pageCols.length || pageCols.some((c) => r[c.name] !== "" && r[c.name] != null);
 }
 
+/** Non-empty rows on the current page: single source of truth for preview, scope, button, and toast counts. */
+export function visiblePageRows(ws: Workspace, list: PageList | undefined, feed: Feed | undefined): Row[] {
+  return pageRows(ws, list, feed).filter(hasPageContent(ws));
+}
+
+/** Canonical on-page row count for a list, accounting for filtered empty slots. */
+export function listRowCount(list: PageList, ws?: Workspace, feed?: Feed): number {
+  if (ws) return visiblePageRows(ws, list, feed).length;
+  const textCols = list.columns.filter((c) => c.fill >= 0.5 && (c.attr === "own" || c.attr === "text" || list.columns.length <= 3));
+  const check = textCols.length ? textCols : list.columns;
+  if (!check.length) return list.count;
+  let count = 0;
+  for (let i = 0; i < list.count; i++) {
+    if (check.some((c) => c.values[i] != null && String(c.values[i]).trim() !== "")) count++;
+  }
+  return count;
+}
+
 /**
  * Rows for every page, from fetched feed rows. Columns seen only on the page
  * are joined back through the anchor column where the row was on screen.
@@ -278,6 +296,18 @@ export function selfCheck(): string {
   const pr = pageRows(withTags, list, feed);
   if (pr[0]["Tags"] !== "x") throw new Error("page rows did not join feed-only column");
   if (feedTitle(feed) !== "Quotes") throw new Error(`feedTitle wrong: ${feedTitle(feed)}`);
+
+  // Row count consistency: 4 DOM items where 1 is an empty placeholder must count as 3 everywhere.
+  const paddedList: PageList = {
+    id: "l-pad", name: "Exhibitors", count: 4, itemSelector: "div.card", score: 1, manual: false,
+    columns: [
+      { key: "h3@own", sel: "h3", attr: "own", name: "Company", values: ["Alpha", "Beta", "Gamma", ""], fill: 0.75 },
+    ],
+  };
+  const paddedWs = openWorkspace(paddedList, []);
+  if (visiblePageRows(paddedWs, paddedList, undefined).length !== 3) throw new Error("visiblePageRows should exclude empty 4th slot");
+  if (listRowCount(paddedList, paddedWs) !== 3 || listRowCount(paddedList) !== 3) throw new Error("listRowCount should match visiblePageRows (3)");
+
   const noisy: Feed = {
     id: "api9", token: "t", endpoint: "GET x/y", jsonPath: "l", total: 9, paginated: true,
     rows: [

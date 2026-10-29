@@ -6,7 +6,7 @@ import { fetchChunk, LockedError, sampleItems, scanPage, ScanError, SkippedItems
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
 import { discoveryRequest, fillPattern, findItemSource, sourceFromPastedUrl, specFor, spread, widerRows } from "@/lib/items-client";
 import { deleteJob, failedItems, finalRows, loadJobs, newJob, progressOf, runJob, type Job, type Progress } from "@/lib/job";
-import { extraFields, hasPageContent, matchList, pageOnly, pageRows, type ItemSource, type Row, type Workspace } from "@/lib/model";
+import { extraFields, listRowCount, matchList, pageOnly, visiblePageRows, type ItemSource, type Row, type Workspace } from "@/lib/model";
 import { deleteRecipe, loadRecipes, saveRecipe, type Recipe } from "@/lib/recipes";
 import { initial, reducer } from "@/lib/studio-state";
 import { Failed, Locked, Printing, Welcome } from "./Blank";
@@ -198,7 +198,16 @@ export default function Studio() {
     return st.feeds.filter((f) => !matched.has(f.id) && f.rows.length >= 3 && f.fields.filter((x) => !x.plumbing && x.fill > 0.3).length >= 2).slice(0, 6);
   }, [st.feeds, listMatches]);
 
-  const onPage = activeList?.count ?? feed?.rows.length ?? 0;
+  const pageRowList = useMemo(() => (ws ? visiblePageRows(ws, activeList, feed) : []), [ws, activeList, feed]);
+  const listCounts = useMemo(
+    () => Object.fromEntries(st.lists.map((l) => {
+      const w = st.ws[l.id];
+      const f = w?.feedId ? st.feeds.find((x) => x.id === w.feedId) : undefined;
+      return [l.id, listRowCount(l, w, f)];
+    })),
+    [st.lists, st.ws, st.feeds],
+  );
+  const onPage = ws ? pageRowList.length : (activeList ? (listCounts[activeList.id] ?? activeList.count) : (feed?.rows.length ?? 0));
   const feedAvailable = !!feed && (feed.paginated || (feed.total ?? 0) > onPage || !activeList);
   const crawlAvailable = !!activeList && activeList.itemSelector !== "body" && ws?.columns.some((c) => c.page);
   const extras = useMemo(() => (ws ? extraFields(ws, feed) : []), [ws, feed]);
@@ -302,8 +311,8 @@ export default function Studio() {
   const rows: Row[] = useMemo(() => {
     if (!ws) return [];
     if (runMatches && run) return finalRows({ ...run.job, ws });
-    return pageRows(ws, activeList, feed).filter(hasPageContent(ws));
-  }, [ws, activeList, feed, run, runMatches]);
+    return pageRowList;
+  }, [ws, pageRowList, run, runMatches]);
 
   /* -------------------------------------------------------- snapshot paint */
 
@@ -372,7 +381,7 @@ export default function Studio() {
 
     // Rows already here and nothing to visit: instant.
     if (scope === "page" && !spec) {
-      const out = pageRows(ws, activeList, feed).filter(hasPageContent(ws));
+      const out = pageRowList;
       const { blob, filename } = await buildFile(format, out, onCols.map((c) => c.name), title);
       download(blob, filename);
       return say(`${fmtN(out.length)} rows saved to ${filename}`);
@@ -512,7 +521,7 @@ export default function Studio() {
             <Preview
               columns={ws?.columns ?? []}
               rows={rows}
-              total={runMatches && run?.state === "done" ? rows.length : expectedRows ?? rows.length}
+              total={runMatches && run?.state === "done" ? rows.length : scope === "page" ? rows.length : expectedRows ?? rows.length}
               label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : hasItemCols ? "this page; item-page columns fill in when you export" : scope === "page" ? "this page" : "this page, before fetching the rest"}
               tableOnly={tableOnly}
               onToggleTableOnly={() => setTableOnly((v) => !v)}
@@ -536,7 +545,7 @@ export default function Studio() {
               {jobCard}
               <section className="section">
                 <div className="section-head"><h2>Found on this page</h2></div>
-                <ListsFound lists={st.lists} otherFeeds={otherFeeds} active={st.active} totals={totals} onPick={(id) => dispatch({ type: "activate", id })} />
+                <ListsFound lists={st.lists} otherFeeds={otherFeeds} active={st.active} totals={totals} counts={listCounts} onPick={(id) => dispatch({ type: "activate", id })} />
                 {layoutMissing && <p className="note warn" style={{ marginTop: 8 }}><AlertTriangle size={14} aria-hidden="true" />The page&rsquo;s layout couldn&rsquo;t be read, so only the site&rsquo;s data is shown.</p>}
                 {scan.notes.map((n) => <p key={n} className="note" style={{ marginTop: 8 }}>{n}</p>)}
               </section>

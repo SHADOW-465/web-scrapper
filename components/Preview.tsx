@@ -25,12 +25,22 @@ export default function Preview({
   const [open, setOpen] = useState(true);
   const isOpen = open || !!tableOnly;
   const on = columns.filter((c) => c.on);
+  const shown = Math.min(rows.length, SHOW);
+  const effectiveTotal = Math.max(shown, total);
   return (
     <section className={`preview${isOpen ? "" : " collapsed"}${tableOnly ? " full" : ""}`} aria-label="Results table">
       <div className="preview-head">
         <h2>Results table</h2>
         <span className="aside">
-          {rows.length ? <><span className="num">{Math.min(rows.length, SHOW).toLocaleString()}</span> of <span className="num">{total.toLocaleString()}</span> rows</> : "No rows yet"} · {label}
+          {rows.length ? (
+            shown === effectiveTotal ? (
+              <><span className="num">{effectiveTotal.toLocaleString()}</span> {effectiveTotal === 1 ? "row" : "rows"}</>
+            ) : (
+              <><span className="num">{shown.toLocaleString()}</span> of <span className="num">{effectiveTotal.toLocaleString()}</span> rows</>
+            )
+          ) : (
+            "No rows yet"
+          )} · {label}
         </span>
         <span style={{ marginLeft: "auto" }} />
         {onToggleTableOnly && (
