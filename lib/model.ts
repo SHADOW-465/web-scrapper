@@ -62,7 +62,7 @@ export interface Workspace {
   items?: ItemsInfo;
 }
 
-const GENERIC = /^(text|title|link|image|number)( \d+)?$/i;
+const GENERIC = /^(text|title|subtitle|subheading|summary|details|notes|link|page link|related link|image|thumbnail|number|(secondary|additional|further|extra|other|more) .+)( \d+)?$/i;
 const NAV_WORDS = /^(home|visit|visitors?|exhibit|exhibitors?|press|news|media|about|about us|contact|contact us|login|log in|sign in|register|search|events?|programme|program|calendar|tickets?|tickets?\s*&\s*prices?|prices?|pricing|services?|faq|help|imprint|impressum|privacy|privacy policy|terms|careers?|jobs?|blog|shop|store|partners?|de|en|fr|es|besuchen|ausstellen|aussteller|presse|kontakt|über uns|anmelden|tickets?\s*&\s*preise|hallenplan|service|agb|datenschutz)$/i;
 const DIR_TEXT = /\b(open|go to|view|search|browse|explore|show|see|find|launch|to the|zum|zur)\s+(the\s+)?(exhibitor|company|vendor|publisher|member|participant|speaker)s?\s*(directory|list|search|catalogue|catalog|database|marketplace|finder|overview|verzeichnis|suche|liste|katalog)?\b|\b(exhibitor|company|vendor|publisher|member|participant)\s+(directory|search|database|catalogue|catalog|marketplace|finder)\b|\b(ausstellerverzeichnis|ausstellersuche|ausstellerkatalog|firmenverzeichnis)\b/i;
 const DIR_HREF = /\/(marketplace\/)?(exhibitors?|exhibitor-directory|exhibitor-search|company-directory|companies)(\/|\?|$)/i;
@@ -127,12 +127,45 @@ function bestName(pageName: string | undefined, feedKey: string | undefined): st
   return pageName;
 }
 
+const ALT_NAMES: Record<string, string[]> = {
+  title: ["Subtitle", "Subheading", "Section title", "Additional title"],
+  text: ["Summary", "Details", "Notes", "Additional text"],
+  description: ["Summary", "Details", "Notes", "Additional description"],
+  link: ["Page link", "Related link", "Secondary link", "Additional link"],
+  "page link": ["Related link", "Secondary link", "Additional link", "Further link"],
+  website: ["Secondary website", "Related link", "Additional link", "Further link"],
+  image: ["Thumbnail", "Photo", "Secondary image", "Additional image"],
+  name: ["Full name", "Short name", "Alternative name", "Additional name"],
+  company: ["Organization", "Division", "Parent company", "Additional company"],
+  category: ["Subcategory", "Group", "Topic", "Additional category"],
+  tags: ["Topics", "Keywords", "Labels", "Additional tags"],
+};
+const QUALIFIERS = ["Secondary", "Additional", "Further", "Extra", "Other", "More", "Alternate", "Supplementary"];
+
 export function uniqueNames(cols: Column[]) {
-  const seen = new Map<string, number>();
+  const used = new Set<string>();
   for (const c of cols) {
-    const n = seen.get(c.name.toLowerCase()) ?? 0;
-    seen.set(c.name.toLowerCase(), n + 1);
-    if (n) c.name = `${c.name} ${n + 1}`;
+    const base = (c.name || "Column").replace(/\s+\d+$/, "").trim() || "Column";
+    if (base !== c.name) c.name = base;
+    const key = base.toLowerCase();
+    if (!used.has(key)) {
+      used.add(key);
+      continue;
+    }
+    const alts = ALT_NAMES[key] ?? [];
+    let chosen = alts.find((a) => !used.has(a.toLowerCase())) ?? "";
+    if (!chosen) {
+      for (const q of QUALIFIERS) {
+        const cand = `${q} ${base.toLowerCase()}`;
+        if (!used.has(cand.toLowerCase())) {
+          chosen = cand;
+          break;
+        }
+      }
+    }
+    if (!chosen) chosen = `Additional ${base.toLowerCase()}`;
+    c.name = chosen;
+    used.add(chosen.toLowerCase());
   }
 }
 
@@ -343,7 +376,20 @@ export function selfCheck(): string {
   const ws = openWorkspace(list, [feed]);
   if (ws.feedId !== "api1") throw new Error("feed not matched");
   const text = ws.columns.find((c) => c.page?.key === "span.text@own")!;
-  if (bestName("Company 2", "country") !== "Country") throw new Error("numbered page name should yield to feed name");
+  if (bestName("Company 2", "country") !== "Country" || bestName("Secondary company", "country") !== "Country") {
+    throw new Error("disambiguated page name should yield to feed name");
+  }
+  const dupCols: Column[] = [
+    { id: "1", name: "Link", ink: "", on: true, sample: "" },
+    { id: "2", name: "Link", ink: "", on: false, sample: "" },
+    { id: "3", name: "Title", ink: "", on: true, sample: "" },
+    { id: "4", name: "Title", ink: "", on: true, sample: "" },
+    { id: "5", name: "Title", ink: "", on: true, sample: "" },
+  ];
+  uniqueNames(dupCols);
+  if (dupCols.some((c) => /\b(Link|Title)\s+\d+$/i.test(c.name))) {
+    throw new Error(`uniqueNames produced numbered jargon: ${dupCols.map((c) => c.name).join(", ")}`);
+  }
   if (text.name !== "Text" || text.feedKey !== "text") throw new Error(`text column wrong: ${text.name}/${text.feedKey}`);
   const withTags = addFeedColumn(ws, feed.fields[0]);
   const rows = feedRows(withTags, list, feed.rows);

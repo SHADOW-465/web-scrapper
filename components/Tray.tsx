@@ -57,7 +57,7 @@ export function ListsFound(props: {
           {isNav ? (
             <span className="badge" style={{ color: "#7a4a00", borderColor: "#e2c08d" }}>Menu / nav</span>
           ) : t ? (
-            <span className="badge badge-feed"><Database size={11} aria-hidden="true" />{t === "many" ? "every page" : <><span className="num">{fmt(t)}</span> total</>}</span>
+            <span className="badge badge-feed"><Database size={11} aria-hidden="true" />{t === "many" ? "all pages" : <><span className="num">{fmt(t)}</span> total</>}</span>
           ) : null}
         </span>
       </button>
@@ -86,7 +86,7 @@ export function ListsFound(props: {
         </div>
       )}
 
-      { (dataLists.length > 0 || otherFeeds.length > 0) && directoryLinks && directoryLinks.length > 0 && onFollowLink && (
+      {(dataLists.length > 0 || otherFeeds.length > 0) && directoryLinks && directoryLinks.length > 0 && onFollowLink && (
         <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
           {directoryLinks.map((d) => (
             <button key={d.url} type="button" className="btn btn-quiet btn-sm" style={{ justifyContent: "space-between" }} onClick={() => onFollowLink(d.url)}>
@@ -122,7 +122,7 @@ export function ListsFound(props: {
                       <span className="num">{fmt(f.total)}</span> total
                     </>
                   ) : f.paginated ? (
-                    "every page"
+                    "all pages"
                   ) : (
                     <>
                       <span className="num">{fmt(f.rows.length)}</span> rows
@@ -131,7 +131,7 @@ export function ListsFound(props: {
                 </span>
                 <span className="badge badge-feed">
                   {f.ai ? <Sparkles size={11} aria-hidden="true" /> : <Database size={11} aria-hidden="true" />}
-                  {f.ai ? "Read by AI" : "Site data"}
+                  {f.ai ? "Read by AI" : "Full list"}
                 </span>
               </span>
             </button>
@@ -141,7 +141,7 @@ export function ListsFound(props: {
 
       {dataLists.length > 0 && (
         <>
-          {primaryFeeds.length > 0 && <div className="subhead">On-screen page lists</div>}
+          {primaryFeeds.length > 0 && <div className="subhead">Lists on this page</div>}
           <div className="lists" role="list">
             {dataLists.map((l) => renderListRow(l, false))}
           </div>
@@ -150,7 +150,7 @@ export function ListsFound(props: {
 
       {remainingFeeds.length > 0 && (
         <>
-          <div className="subhead">Other data behind this page</div>
+          <div className="subhead">More lists on this page</div>
           <div className="lists" role="list">
             {remainingFeeds.map((f) => (
               <button key={f.id} role="listitem" className="listrow" aria-pressed={active === `feed:${f.id}`} onClick={() => onPick(`feed:${f.id}`)}>
@@ -158,7 +158,7 @@ export function ListsFound(props: {
                   <span className="lname"><span>{feedTitle(f)}</span></span>
                   <span className="lmeta">{f.fields.filter((x) => !x.plumbing).slice(0, 4).map((x) => x.label).join(" · ")}</span>
                 </span>
-                <span className="count">{f.total ? <><span className="num">{fmt(f.total)}</span> total</> : f.paginated ? "every page" : <><span className="num">{fmt(f.rows.length)}</span> rows</>}</span>
+                <span className="count">{f.total ? <><span className="num">{fmt(f.total)}</span> total</> : f.paginated ? "all pages" : <><span className="num">{fmt(f.rows.length)}</span> rows</>}</span>
               </button>
             ))}
           </div>
@@ -184,10 +184,10 @@ export function ListsFound(props: {
 /* ------------------------------------------------------------ columns */
 
 function sourceTag(c: Column, hasFeed: boolean) {
-  if (c.page && c.feedKey) return <span className="tag" title="Matched to the site's data, so it fills on every page"><Database size={11} aria-hidden="true" />every page</span>;
-  if (c.page && hasFeed) return <span className="tag warn" title="Not in the site's data: fills only for rows that were on screen"><Eye size={11} aria-hidden="true" />on-screen only</span>;
-  if (c.page) return <span className="tag" title="Read from the page"><Eye size={11} aria-hidden="true" />on page</span>;
-  return <span className="tag" title="Not shown on the page, but in the site's data"><Database size={11} aria-hidden="true" />site data</span>;
+  if (c.page && c.feedKey) return <span className="tag" title="Available across all pages"><Database size={11} aria-hidden="true" />all pages</span>;
+  if (c.page && hasFeed) return <span className="tag warn" title="Available only for rows visible on this page"><Eye size={11} aria-hidden="true" />this page only</span>;
+  if (c.page) return <span className="tag" title="Read from this page"><Eye size={11} aria-hidden="true" />on page</span>;
+  return <span className="tag" title="Available across all pages"><Database size={11} aria-hidden="true" />all pages</span>;
 }
 
 export function ColumnTray(props: {
@@ -201,52 +201,71 @@ export function ColumnTray(props: {
   const [drag, setDrag] = useState<string | null>(null);
   const [over, setOver] = useState<string | null>(null);
 
+  const indexed = ws.columns.map((c, i) => ({ c, i })).filter(({ c }) => !c.item);
+  const visibleLimit = Math.max(8, indexed.filter(({ c }) => c.on).length);
+  const primaryCols: Array<{ c: Column; i: number }> = [];
+  const extraCols: Array<{ c: Column; i: number }> = [];
+  for (const entry of indexed) {
+    if (entry.c.on || primaryCols.length < visibleLimit) primaryCols.push(entry);
+    else extraCols.push(entry);
+  }
+
+  const renderCol = ({ c, i }: { c: Column; i: number }) => (
+    <li
+      key={c.id}
+      className={`col${c.on ? "" : " off"}${drag === c.id ? " dragging" : ""}${over === c.id && drag && drag !== c.id ? " over" : ""}`}
+      style={{ ["--ink" as string]: c.ink }}
+      draggable
+      onDragStart={(e) => { setDrag(c.id); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", c.id); }}
+      onDragEnd={() => { setDrag(null); setOver(null); }}
+      onDragOver={(e) => { e.preventDefault(); setOver(c.id); }}
+      onDrop={(e) => { e.preventDefault(); if (drag) dispatch({ type: "move", id: drag, to: i }); setDrag(null); setOver(null); }}
+      onMouseEnter={() => c.page && c.on && onFlash(c.page.key)}
+    >
+      <span className="grip" aria-hidden="true"><GripVertical size={14} /></span>
+      <button
+        className="cap"
+        aria-pressed={c.on}
+        aria-label={`${c.on ? "Remove" : "Include"} ${c.name}`}
+        title={c.on ? "Selected. Click to remove" : "Not selected. Click to include"}
+        onClick={() => dispatch({ type: "toggle", id: c.id })}
+      />
+      <div className="cbody">
+        <input
+          className="cname"
+          value={c.name}
+          aria-label="Column name"
+          onChange={(e) => dispatch({ type: "rename", id: c.id, name: e.target.value })}
+          onKeyDown={(e) => {
+            if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+              e.preventDefault();
+              dispatch({ type: "move", id: c.id, to: i + (e.key === "ArrowUp" ? -1 : 1) });
+            }
+          }}
+        />
+        <div className="csample" title={c.sample}>{c.sample || <i>empty on this page</i>}</div>
+      </div>
+      <span className="csrc">{sourceTag(c, hasFeed)}</span>
+    </li>
+  );
+
   return (
     <>
       <ul className="cols" aria-label="Columns">
-        {ws.columns.map((c, i) => c.item ? null : (
-          <li
-            key={c.id}
-            className={`col${c.on ? "" : " off"}${drag === c.id ? " dragging" : ""}${over === c.id && drag && drag !== c.id ? " over" : ""}`}
-            style={{ ["--ink" as string]: c.ink }}
-            draggable
-            onDragStart={(e) => { setDrag(c.id); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", c.id); }}
-            onDragEnd={() => { setDrag(null); setOver(null); }}
-            onDragOver={(e) => { e.preventDefault(); setOver(c.id); }}
-            onDrop={(e) => { e.preventDefault(); if (drag) dispatch({ type: "move", id: drag, to: i }); setDrag(null); setOver(null); }}
-            onMouseEnter={() => c.page && c.on && onFlash(c.page.key)}
-          >
-            <span className="grip" aria-hidden="true"><GripVertical size={14} /></span>
-            <button
-              className="cap"
-              aria-pressed={c.on}
-              aria-label={`${c.on ? "Remove" : "Include"} ${c.name}`}
-              title={c.on ? "Included. Click to leave out" : "Left out. Click to include"}
-              onClick={() => dispatch({ type: "toggle", id: c.id })}
-            />
-            <div className="cbody">
-              <input
-                className="cname"
-                value={c.name}
-                aria-label="Column name"
-                onChange={(e) => dispatch({ type: "rename", id: c.id, name: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
-                    e.preventDefault();
-                    dispatch({ type: "move", id: c.id, to: i + (e.key === "ArrowUp" ? -1 : 1) });
-                  }
-                }}
-              />
-              <div className="csample" title={c.sample}>{c.sample || <i>empty on this page</i>}</div>
-            </div>
-            <span className="csrc">{sourceTag(c, hasFeed)}</span>
-          </li>
-        ))}
+        {primaryCols.map(renderCol)}
       </ul>
+      {extraCols.length > 0 && (
+        <details className="extra">
+          <summary><ChevronRight size={14} aria-hidden="true" />Show more columns ({extraCols.length})</summary>
+          <ul className="cols" aria-label="More columns">
+            {extraCols.map(renderCol)}
+          </ul>
+        </details>
+      )}
       {extras.length > 0 && (
         <details className="extra">
-          <summary><ChevronRight size={14} aria-hidden="true" />Also in the site&rsquo;s data ({extras.length})</summary>
-          <p>Fields the site sends but this page doesn&rsquo;t show. Add any to your columns.</p>
+          <summary><ChevronRight size={14} aria-hidden="true" />More columns available ({extras.length})</summary>
+          <p>Extra columns available for these rows. Click Add to include any of them.</p>
           {extras.map((f) => (
             <div className="extrarow" key={f.key}>
               <div style={{ minWidth: 0 }}>
@@ -281,10 +300,10 @@ export function ScopePicker(props: {
           <input type="radio" name="scope" checked={scope === "feed"} onChange={() => setScope("feed")} />
           <span>
             <span className="sname">Every page, from the site&rsquo;s data <span className="count">{feed.total ? <span className="num">{fmt(feed.total)}</span> : feed.paginated ? "all of it" : ""}</span></span>
-            <span className="sdesc">Fastest and most complete. Reads the same data the page loads, page after page.</span>
+            <span className="sdesc">Fastest and most complete. Reads the full directory across all pages.</span>
             {scope === "feed" && feed.pageOnly.length > 0 && (
               <span className="sdesc" style={{ display: "block", marginTop: 6, color: "#7a4a00" }}>
-                {feed.pageOnly.join(", ")} {feed.pageOnly.length > 1 ? "exist" : "exists"} only on the page, so {feed.pageOnly.length > 1 ? "they fill" : "it fills"} just the rows that were on screen.
+                {feed.pageOnly.join(", ")} {feed.pageOnly.length > 1 ? "are" : "is"} only visible on the current page, so {feed.pageOnly.length > 1 ? "they fill" : "it fills"} just the rows shown right now.
               </span>
             )}
           </span>
@@ -316,7 +335,7 @@ export function ScopePicker(props: {
         <input type="radio" name="scope" checked={scope === "page"} onChange={() => setScope("page")} />
         <span>
           <span className="sname">Just this page <span className="count"><span className="num">{fmt(onPage)}</span></span></span>
-          <span className="sdesc">Exactly what&rsquo;s on screen now. Instant.</span>
+          <span className="sdesc">Only the rows shown right now. Instant.</span>
         </span>
       </label>
     </div>
@@ -351,7 +370,7 @@ export function ItemFields(props: {
     <li key={c.id} className={`col item${c.on ? "" : " off"}`} style={{ ["--ink" as string]: c.ink }}>
       <span />
       <button className="cap" aria-pressed={c.on} aria-label={`${c.on ? "Remove" : "Include"} ${c.name}`}
-        title={c.on ? "Included. Click to leave out" : "Left out. Click to include"} onClick={() => dispatch({ type: "toggle", id: c.id })} />
+        title={c.on ? "Selected. Click to remove" : "Not selected. Click to include"} onClick={() => dispatch({ type: "toggle", id: c.id })} />
       <div className="cbody">
         <input className="cname" value={c.name} aria-label="Column name" onChange={(e) => dispatch({ type: "rename", id: c.id, name: e.target.value })} />
         <div className="csample" title={c.sample}>{c.sample || <i>empty on the sample page</i>}</div>
@@ -360,41 +379,54 @@ export function ItemFields(props: {
     </li>
   );
 
+  const singleCols = cols.filter((c) => !c.item!.listId);
+  const singleLimit = Math.max(6, singleCols.filter((c) => c.on).length);
+  const primarySingles: Column[] = [];
+  const extraSingles: Column[] = [];
+  for (const c of singleCols) {
+    if (c.on || primarySingles.length < singleLimit) primarySingles.push(c);
+    else extraSingles.push(c);
+  }
+
   return (
     <section className="section">
       <div className="section-head">
         <h2>From each item&rsquo;s own page</h2>
-        {cat ? <span className="aside">{on.length} of {cols.length} picked</span> : null}
+        {cat ? <span className="aside">{on.length} selected</span> : null}
       </div>
 
       {info.status === "looking" && (
-        <p className="note" aria-live="polite"><Loader2 size={14} className="spin" aria-hidden="true" />{info.message ?? "Checking what each item's page shows"}</p>
+        <p className="note" aria-live="polite"><Loader2 size={14} className="spin" aria-hidden="true" />{info.message ?? "Checking what each item's detail page offers"}</p>
       )}
 
       {info.status === "error" && (
         <div>
-          <p className="note err" role="alert">{info.message ?? "The item page couldn't be read."}</p>
+          <p className="note err" role="alert">{info.message ?? "The detail page couldn't be read."}</p>
           <button className="btn btn-quiet btn-sm" onClick={onRetry}><RotateCcw size={13} aria-hidden="true" />Try again</button>
         </div>
       )}
 
       {info.status === "none" && (
-        <form className="pastebox" onSubmit={(e) => { e.preventDefault(); if (pasted.trim()) onPaste(pasted.trim()); }}>
-          <p className="note">{info.message ?? "Couldn't find pages for these rows automatically."} If each row has a page of its own, open one in your browser and paste its address here.</p>
-          <div className="exportrow">
-            <input className="fname" value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="https://…/one-item" aria-label="One item's page address" inputMode="url" />
-            <button className="btn btn-quiet">Use it</button>
-          </div>
-        </form>
+        <div>
+          <p className="note">{info.message ?? "No detail pages were found automatically for these rows."}</p>
+          <details className="extra">
+            <summary><ChevronRight size={14} aria-hidden="true" />Advanced options</summary>
+            <p>Have an example detail page link? Enter it below to look for extra fields.</p>
+            <form className="exportrow" onSubmit={(e) => { e.preventDefault(); if (pasted.trim()) onPaste(pasted.trim()); }}>
+              <input className="fname" value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="https://…/company-profile" aria-label="Example page link" inputMode="url" />
+              <button className="btn btn-quiet">Use example</button>
+            </form>
+          </details>
+        </div>
       )}
 
       {info.status === "ready" && cat && (
         <>
           <p className="note">
             <FileText size={14} aria-hidden="true" />
-            <span>Read from pages like{" "}
-              <a href={cat.sampleUrl} target="_blank" rel="noreferrer noopener">{cat.title || "this one"}<ExternalLink size={11} aria-hidden="true" style={{ marginLeft: 3, verticalAlign: -1 }} /></a>.
-              {cat.mode === "browser" ? " These pages only load in a browser, so this part is slower." : ""}
+            <span>Extra details found on pages like{" "}
+              <a href={cat.sampleUrl} target="_blank" rel="noreferrer noopener">{cat.title || "this example"}<ExternalLink size={11} aria-hidden="true" style={{ marginLeft: 3, verticalAlign: -1 }} /></a>.
+              {cat.mode === "browser" ? " These pages require full browser loading, so exporting them takes longer." : ""}
             </span>
           </p>
           {cat.lists.map((l) => {
@@ -403,24 +435,30 @@ export function ItemFields(props: {
             return (
               <div key={l.id}>
                 <div className="subhead">{l.name && l.name !== cat.title ? l.name : "Repeating list"} · {l.count} on the sample page</div>
-                <p className="hint-line" style={{ marginTop: 0 }}>Picking any of these gives one row per entry.</p>
+                <p className="hint-line" style={{ marginTop: 0 }}>Selecting any of these creates one row per person or entry.</p>
                 <ul className="cols">{lc.map(row)}</ul>
               </div>
             );
           })}
-          {cols.some((c) => !c.item!.listId) && (
+          {singleCols.length > 0 && (
             <>
               <div className="subhead">About each item</div>
-              <ul className="cols">{cols.filter((c) => !c.item!.listId).map(row)}</ul>
+              <ul className="cols">{primarySingles.map(row)}</ul>
+              {extraSingles.length > 0 && (
+                <details className="extra">
+                  <summary><ChevronRight size={14} aria-hidden="true" />Show more fields ({extraSingles.length})</summary>
+                  <ul className="cols">{extraSingles.map(row)}</ul>
+                </details>
+              )}
             </>
           )}
           {!cols.length && <p className="note">Nothing extra was found on the sample page.</p>}
           <details className="extra">
-            <summary><ChevronRight size={14} aria-hidden="true" />Missing something?</summary>
-            <p>These fields come from a few sample pages. If some items show more (a team, contact details), paste the address of one of those pages to use it as the example.</p>
+            <summary><ChevronRight size={14} aria-hidden="true" />Advanced options</summary>
+            <p>Try a different example page if some companies show extra details (like team members or contact info).</p>
             <form className="exportrow" onSubmit={(e) => { e.preventDefault(); if (pasted.trim()) onPaste(pasted.trim()); }}>
-              <input className="fname" value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="https://…/one-item" aria-label="Example item page address" inputMode="url" />
-              <button className="btn btn-quiet">Use it</button>
+              <input className="fname" value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="https://…/company-profile" aria-label="Example page link" inputMode="url" />
+              <button className="btn btn-quiet">Use example</button>
             </form>
           </details>
           {on.length > 0 && rowCount ? (

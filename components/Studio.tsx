@@ -591,13 +591,13 @@ export default function Studio() {
                 <section className="section">
                   <div className="section-head">
                     <h2>On each row</h2>
-                    <span className="aside">{onCols.filter((c) => !c.item).length} of {ws.columns.filter((c) => !c.item).length} picked</span>
+                    <span className="aside">{onCols.filter((c) => !c.item).length} selected</span>
                   </div>
                   {activeList?.manual && st.lists.some((l) => !l.manual) && (
                     <p className="note" style={{ margin: "0 0 10px" }}>New list from your click. Your other columns are kept: pick a list above to go back to it.</p>
                   )}
                   <ColumnTray ws={ws} hasFeed={!!feed} extras={extras} dispatch={dispatch as never} onFlash={flash} />
-                  {activeList && <p className="hint-line"><MousePointerClick size={13} aria-hidden="true" />Click anything on the page to add it. Click an ink to take it off.</p>}
+                  {activeList && <p className="hint-line"><MousePointerClick size={13} aria-hidden="true" />Click anything on the page preview to add or remove a column.</p>}
                 </section>
               )}
 
