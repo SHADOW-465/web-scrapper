@@ -62,7 +62,9 @@ export default function Studio() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [saving, setSaving] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [doneNote, setDoneNote] = useState<string | null>(null);
   const [layoutMissing, setLayoutMissing] = useState(false);
+  const [iframeReady, setIframeReady] = useState(false);
   const [tableOnly, setTableOnly] = useState(false);
 
   const sheet = useRef<SheetHandle>(null);
@@ -102,6 +104,7 @@ export default function Studio() {
     jobAbort.current?.abort();
     jobAbort.current = null;
     setRun(null);
+    setDoneNote(null);
     const ac = new AbortController();
     abort.current = ac;
     setUrl(u);
@@ -110,6 +113,7 @@ export default function Studio() {
     setError("");
     setScan(null);
     setLayoutMissing(false);
+    setIframeReady(false);
     setScopeTouched(!!pending.current);
     gotReady.current = false;
     looking.current.clear();
@@ -139,13 +143,17 @@ export default function Studio() {
       if (!m || m.source !== "scrape-studio") return;
       if (m.type === "ready") {
         gotReady.current = true;
+        setIframeReady(true);
         const r = pending.current;
         pending.current = null;
+        const fromIframe = (m.directoryLinks as DirectoryLink[] | undefined) ?? [];
+        const fromSnap = scan ? findDirectoryLinksInHtml(scan.snapshot, scan.finalUrl) : [];
+        const mergedDirLinks = [...fromIframe, ...fromSnap];
         dispatch({
           type: "ready",
           lists: (m.lists as never) ?? [],
           next: (m.next as never) ?? null,
-          directoryLinks: (m.directoryLinks as never) ?? [],
+          directoryLinks: mergedDirLinks,
           prefer: r ? { itemSelector: r.itemSelector, columns: r.columns, feedEndpoint: r.feed?.endpoint, itemColumns: r.itemColumns } : undefined,
         });
         if (r) {
@@ -161,7 +169,7 @@ export default function Studio() {
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [say]);
+  }, [say, scan]);
 
   // A snapshot that never reports (its layout broke without scripts): use the site's data alone.
   useEffect(() => {
@@ -182,16 +190,19 @@ export default function Studio() {
   const feed = ws?.feedId ? st.feeds.find((f) => f.id === ws.feedId) : undefined;
   const directoryLinks = useMemo<DirectoryLink[]>(() => {
     const out: DirectoryLink[] = [];
-    const seen = new Set<string>();
+    const seenUrls = new Set<string>();
+    const seenLabels = new Set<string>();
     for (const d of [...st.directoryLinks, ...(scan ? findDirectoryLinksInHtml(scan.snapshot, scan.finalUrl) : [])]) {
-      if (!d.url || seen.has(d.url)) continue;
-      seen.add(d.url);
+      const labelKey = d.label.trim().toLowerCase();
+      if (!d.url || seenUrls.has(d.url) || seenLabels.has(labelKey)) continue;
+      seenUrls.add(d.url);
+      seenLabels.add(labelKey);
       out.push(d);
     }
     return out;
   }, [st.directoryLinks, scan]);
   const isNavigation = looksLikeNavigation(activeList);
-  const noListFound = !ws && (gotReady.current || layoutMissing);
+  const noListFound = !ws && (iframeReady || layoutMissing);
 
   const listMatches = useMemo(
     () => Object.fromEntries(st.lists.map((l) => [l.id, st.ws[l.id]?.match ?? matchList(l, st.feeds)])),
@@ -208,8 +219,17 @@ export default function Studio() {
   }, [st.lists, st.feeds, listMatches]);
   const otherFeeds = useMemo(() => {
     const matched = new Set(Object.values(listMatches).filter(Boolean).map((m) => m!.apiId));
-    return st.feeds.filter((f) => !matched.has(f.id) && f.rows.length >= 3 && f.fields.filter((x) => !x.plumbing && x.fill > 0.3).length >= 2).slice(0, 6);
-  }, [st.feeds, listMatches]);
+    return st.feeds
+      .filter((f) => {
+        if (st.active === `feed:${f.id}`) return true;
+        if (matched.has(f.id)) return false;
+        if (/\b(filters?|facets?)\b/i.test(`${f.jsonPath} ${f.endpoint}`)) return false;
+        const nonPlumbing = f.fields.filter((x) => !x.plumbing && x.fill > 0.3);
+        if (nonPlumbing.length <= 3 && nonPlumbing.every((x) => /^(name|parent|iso|cnt|count|id|value|label|selected|cond|item_url)$/i.test(x.key.split(".").pop() ?? x.key))) return false;
+        return f.rows.length >= 3 && nonPlumbing.length >= 2;
+      })
+      .slice(0, 6);
+  }, [st.feeds, listMatches, st.active]);
 
   const pageRowList = useMemo(() => (ws ? visiblePageRows(ws, activeList, feed) : []), [ws, activeList, feed]);
   const listCounts = useMemo(
@@ -397,12 +417,16 @@ export default function Studio() {
       const out = pageRowList;
       const { blob, filename } = await buildFile(format, out, onCols.map((c) => c.name), title);
       download(blob, filename);
-      return say(`${fmtN(out.length)} rows saved to ${filename}`);
+      const msg = `${fmtN(out.length)} rows saved to ${filename}`;
+      setDoneNote(`${msg}. Pick another format to download again.`);
+      return say(msg);
     }
     // The last run already has these rows and item pages: just write the file again.
     if (runMatches && run?.state === "done" && JSON.stringify(specFor(run.job.ws)?.fields.map((f) => f.key)) === JSON.stringify(spec?.fields.map((f) => f.key))) {
       const { count, filename } = await deliver({ ...run.job, ws, format, title });
-      return say(`${fmtN(count)} rows saved to ${filename}`);
+      const msg = `${fmtN(count)} rows saved to ${filename}`;
+      setDoneNote(`${msg}. Pick another format to download again.`);
+      return say(msg);
     }
 
     let crawl: CrawlRequest | undefined;
@@ -574,7 +598,7 @@ export default function Studio() {
                   totals={totals}
                   counts={listCounts}
                   directoryLinks={directoryLinks}
-                  onPick={(id) => dispatch({ type: "activate", id })}
+                  onPick={(id) => { setDoneNote(null); dispatch({ type: "activate", id }); }}
                   onFollowLink={followDirectoryLink}
                 />
                 {isNavigation && (
@@ -643,7 +667,12 @@ export default function Studio() {
                         <Download size={16} aria-hidden="true" />{exportLabel}
                       </button>
                     </div>
-                    {runMatches && run?.state === "done" && run.message && <p className="note ok"><Check size={14} aria-hidden="true" />{run.message} Pick another format to download again.</p>}
+                    {((runMatches && run?.state === "done" && run.message) || doneNote) && (
+                      <p className="note ok">
+                        <Check size={14} aria-hidden="true" />
+                        {runMatches && run?.state === "done" && run.message ? `${run.message} Pick another format to download again.` : doneNote}
+                      </p>
+                    )}
                     {runMatches && run?.state === "stopped" && (
                       <p className="note">{run.message} <button className="linkbtn" onClick={() => void execute(run.job)}>Resume</button></p>
                     )}

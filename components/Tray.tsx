@@ -64,9 +64,11 @@ export function ListsFound(props: {
     );
   };
 
+  const noCompanyList = !active || (!dataLists.length && !otherFeeds.length);
+
   return (
     <>
-      {!dataLists.length && !otherFeeds.length && (
+      {noCompanyList && (
         <div style={{ marginBottom: 10 }}>
           <p className="note warn">
             <ScanLine size={15} aria-hidden="true" />
@@ -86,7 +88,7 @@ export function ListsFound(props: {
         </div>
       )}
 
-      {(dataLists.length > 0 || otherFeeds.length > 0) && directoryLinks && directoryLinks.length > 0 && onFollowLink && (
+      {!noCompanyList && (dataLists.length > 0 || otherFeeds.length > 0) && directoryLinks && directoryLinks.length > 0 && onFollowLink && (
         <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
           {directoryLinks.map((d) => (
             <button key={d.url} type="button" className="btn btn-quiet btn-sm" style={{ justifyContent: "space-between" }} onClick={() => onFollowLink(d.url)}>
@@ -117,21 +119,11 @@ export function ListsFound(props: {
               </span>
               <span style={{ display: "grid", justifyItems: "end", gap: 3 }}>
                 <span className="count">
-                  {f.total ? (
-                    <>
-                      <span className="num">{fmt(f.total)}</span> total
-                    </>
-                  ) : f.paginated ? (
-                    "all pages"
-                  ) : (
-                    <>
-                      <span className="num">{fmt(f.rows.length)}</span> rows
-                    </>
-                  )}
+                  <span className="num">{fmt(f.rows.length)}</span> on page
                 </span>
                 <span className="badge badge-feed">
                   {f.ai ? <Sparkles size={11} aria-hidden="true" /> : <Database size={11} aria-hidden="true" />}
-                  {f.ai ? "Read by AI" : "Full list"}
+                  {f.ai ? "Read by AI" : f.total ? <><span className="num">{fmt(f.total)}</span> total</> : f.paginated ? "all pages" : "Full list"}
                 </span>
               </span>
             </button>
@@ -429,29 +421,39 @@ export function ItemFields(props: {
               {cat.mode === "browser" ? " These pages require full browser loading, so exporting them takes longer." : ""}
             </span>
           </p>
-          {cat.lists.map((l) => {
-            const lc = cols.filter((c) => c.item!.listId === l.id);
-            if (!lc.length) return null;
-            return (
+          {(() => {
+            const nonEmptyLists = cat.lists
+              .map((l) => ({ l, lc: cols.filter((c) => c.item!.listId === l.id) }))
+              .filter(({ lc }) => lc.length > 0);
+            const primaryLists = nonEmptyLists.filter(({ lc }, idx) => idx === 0 || lc.some((c) => c.on));
+            const extraLists = nonEmptyLists.filter((entry) => !primaryLists.includes(entry));
+            const extraFieldCount = extraSingles.length + extraLists.reduce((acc, { lc }) => acc + lc.length, 0);
+            const renderItemList = ({ l, lc }: { l: typeof cat.lists[number]; lc: Column[] }) => (
               <div key={l.id}>
                 <div className="subhead">{l.name && l.name !== cat.title ? l.name : "Repeating list"} · {l.count} on the sample page</div>
                 <p className="hint-line" style={{ marginTop: 0 }}>Selecting any of these creates one row per person or entry.</p>
                 <ul className="cols">{lc.map(row)}</ul>
               </div>
             );
-          })}
-          {singleCols.length > 0 && (
-            <>
-              <div className="subhead">About each item</div>
-              <ul className="cols">{primarySingles.map(row)}</ul>
-              {extraSingles.length > 0 && (
-                <details className="extra">
-                  <summary><ChevronRight size={14} aria-hidden="true" />Show more fields ({extraSingles.length})</summary>
-                  <ul className="cols">{extraSingles.map(row)}</ul>
-                </details>
-              )}
-            </>
-          )}
+            return (
+              <>
+                {primaryLists.map(renderItemList)}
+                {primarySingles.length > 0 && (
+                  <>
+                    <div className="subhead">About each item</div>
+                    <ul className="cols">{primarySingles.map(row)}</ul>
+                  </>
+                )}
+                {extraFieldCount > 0 && (
+                  <details className="extra">
+                    <summary><ChevronRight size={14} aria-hidden="true" />Show more fields ({extraFieldCount})</summary>
+                    {extraSingles.length > 0 && <ul className="cols">{extraSingles.map(row)}</ul>}
+                    {extraLists.map(renderItemList)}
+                  </details>
+                )}
+              </>
+            );
+          })()}
           {!cols.length && <p className="note">Nothing extra was found on the sample page.</p>}
           <details className="extra">
             <summary><ChevronRight size={14} aria-hidden="true" />Advanced options</summary>

@@ -62,10 +62,10 @@ export interface Workspace {
   items?: ItemsInfo;
 }
 
-const GENERIC = /^(text|title|subtitle|subheading|summary|details|notes|link|page link|related link|image|thumbnail|number|(secondary|additional|further|extra|other|more) .+)( \d+)?$/i;
+const GENERIC = /^(text|title|subtitle|subheading|summary|details|notes|link|page link|related link|image|thumbnail|number|company|organization|(secondary|additional|further|extra|other|more) .+)( \d+)?$/i;
 const NAV_WORDS = /^(home|visit|visitors?|exhibit|exhibitors?|press|news|media|about|about us|contact|contact us|login|log in|sign in|register|search|events?|programme|program|calendar|tickets?|tickets?\s*&\s*prices?|prices?|pricing|services?|faq|help|imprint|impressum|privacy|privacy policy|terms|careers?|jobs?|blog|shop|store|partners?|de|en|fr|es|besuchen|ausstellen|aussteller|presse|kontakt|über uns|anmelden|tickets?\s*&\s*preise|hallenplan|service|agb|datenschutz)$/i;
 const DIR_TEXT = /\b(open|go to|view|search|browse|explore|show|see|find|launch|to the|zum|zur)\s+(the\s+)?(exhibitor|company|vendor|publisher|member|participant|speaker)s?\s*(directory|list|search|catalogue|catalog|database|marketplace|finder|overview|verzeichnis|suche|liste|katalog)?\b|\b(exhibitor|company|vendor|publisher|member|participant)\s+(directory|search|database|catalogue|catalog|marketplace|finder)\b|\b(ausstellerverzeichnis|ausstellersuche|ausstellerkatalog|firmenverzeichnis)\b/i;
-const DIR_HREF = /\/(marketplace\/)?(exhibitors?|exhibitor-directory|exhibitor-search|company-directory|companies)(\/|\?|$)/i;
+const DIR_HREF = /\/(marketplace\/)?(exhibitors|exhibitor-directory|exhibitor-search|company-directory|companies)\/?$/i;
 
 /** Whether a detected list looks like site navigation (menus, headers, footers) rather than a company/data list. */
 export function looksLikeNavigation(list: PageList | undefined): boolean {
@@ -88,6 +88,13 @@ export function looksLikeNavigation(list: PageList | undefined): boolean {
 export function findDirectoryLinksInHtml(html: string, baseUrl: string): DirectoryLink[] {
   if (!html) return [];
   const here = baseUrl.split("#")[0];
+  let hereOrigin = "";
+  let hereNormPath = "";
+  try {
+    const u = new URL(here);
+    hereOrigin = u.origin;
+    hereNormPath = u.pathname.replace(/^\/(de|en|fr|es|it)(\/|$)/i, "/").replace(/\/+$/, "");
+  } catch { /* ignore */ }
   const out: Array<DirectoryLink & { priority: number }> = [];
   const seen = new Set<string>();
   const re = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
@@ -99,17 +106,26 @@ export function findDirectoryLinksInHtml(html: string, baseUrl: string): Directo
     const rawHref = hrefMatch[1].trim();
     if (!rawHref || /^(#|javascript:|mailto:|tel:)/i.test(rawHref)) continue;
     let url = "";
+    let path = "";
+    let normPath = "";
+    let origin = "";
     try {
-      url = new URL(rawHref, baseUrl).href;
+      const parsed = new URL(rawHref, baseUrl);
+      url = parsed.href;
+      origin = parsed.origin;
+      path = parsed.pathname;
+      normPath = path.replace(/^\/(de|en|fr|es|it)(\/|$)/i, "/").replace(/\/+$/, "");
     } catch {
       continue;
     }
     if (!/^https?:/i.test(url) || url.split("#")[0] === here || seen.has(url)) continue;
+    if (origin === hereOrigin && normPath === hereNormPath) continue;
     const titleAttr = attrs.match(/\b(?:title|aria-label)=["']([^"']+)["']/i)?.[1] ?? "";
     const innerText = m[2].replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/[→›»>←‹«<]+/g, " ").replace(/\s+/g, " ").trim();
     const text = innerText || titleAttr.trim();
+    if (/^(de|en|fr|es|it|deutsch|english)$/i.test(text)) continue;
     const textHit = DIR_TEXT.test(text);
-    const hrefHit = DIR_HREF.test(url);
+    const hrefHit = DIR_HREF.test(path) && (!text || /\b(exhibitor|company|directory|marketplace|catalogue|catalog|search|aussteller|verzeichnis|suche|katalog)\b/i.test(text));
     if (!textHit && !hrefHit) continue;
     seen.add(url);
     const label = text && text.length <= 70 ? text : "Open exhibitor directory";
@@ -128,30 +144,34 @@ function bestName(pageName: string | undefined, feedKey: string | undefined): st
 }
 
 const ALT_NAMES: Record<string, string[]> = {
-  title: ["Subtitle", "Subheading", "Section title", "Additional title"],
-  text: ["Summary", "Details", "Notes", "Additional text"],
-  description: ["Summary", "Details", "Notes", "Additional description"],
-  link: ["Page link", "Related link", "Secondary link", "Additional link"],
-  "page link": ["Related link", "Secondary link", "Additional link", "Further link"],
-  website: ["Secondary website", "Related link", "Additional link", "Further link"],
-  image: ["Thumbnail", "Photo", "Secondary image", "Additional image"],
-  name: ["Full name", "Short name", "Alternative name", "Additional name"],
-  company: ["Organization", "Division", "Parent company", "Additional company"],
-  category: ["Subcategory", "Group", "Topic", "Additional category"],
-  tags: ["Topics", "Keywords", "Labels", "Additional tags"],
+  title: ["Subtitle", "Subheading", "Section title", "Heading", "Page title", "Item title", "Header", "Additional title"],
+  text: ["Summary", "Details", "Notes", "Excerpt", "Body text", "Overview", "Additional text"],
+  description: ["Summary", "Details", "Notes", "Overview", "Profile text", "Additional description"],
+  link: ["Page link", "Related link", "Website link", "External link", "Reference link", "Additional link"],
+  "page link": ["Related link", "Website link", "External link", "Reference link", "Item link", "Additional link"],
+  website: ["Official website", "Related link", "External link", "Web address", "Additional website"],
+  image: ["Thumbnail", "Photo", "Logo", "Picture", "Banner image", "Additional image"],
+  name: ["Full name", "Short name", "Display name", "Item name", "Entry name", "Label", "Alternative name", "Additional name"],
+  company: ["Organization", "Publisher", "Exhibitor", "Brand", "Division", "Parent company", "Additional company"],
+  category: ["Subcategory", "Group", "Topic", "Sector", "Segment", "Additional category"],
+  tags: ["Topics", "Keywords", "Labels", "Subjects", "Themes", "Additional tags"],
 };
 const QUALIFIERS = ["Secondary", "Additional", "Further", "Extra", "Other", "More", "Alternate", "Supplementary"];
 
 export function uniqueNames(cols: Column[]) {
   const used = new Set<string>();
+  const qualRe = new RegExp(`^(${QUALIFIERS.join("|")})\\s+`, "i");
   for (const c of cols) {
-    const base = (c.name || "Column").replace(/\s+\d+$/, "").trim() || "Column";
-    if (base !== c.name) c.name = base;
-    const key = base.toLowerCase();
-    if (!used.has(key)) {
-      used.add(key);
+    const raw = (c.name || "Column").replace(/\s+\d+$/, "").trim() || "Column";
+    if (raw !== c.name) c.name = raw;
+    const rawKey = raw.toLowerCase();
+    if (!used.has(rawKey)) {
+      used.add(rawKey);
       continue;
     }
+    const stripped = raw.replace(qualRe, "").trim() || raw;
+    const base = stripped.charAt(0).toUpperCase() + stripped.slice(1);
+    const key = base.toLowerCase();
     const alts = ALT_NAMES[key] ?? [];
     let chosen = alts.find((a) => !used.has(a.toLowerCase())) ?? "";
     if (!chosen) {
@@ -208,6 +228,9 @@ export function openWorkspace(list: PageList, feeds: Feed[]): Workspace {
 function wantedByDefault(f: FeedField, feed: Feed): boolean {
   if (f.plumbing || f.fill < 0.5) return false;
   if (/^(https?:)?\/\//i.test(f.sample) || /\.(png|jpe?g|gif|svg|webp)(\?|$)/i.test(f.sample)) return false;
+  // Internal URL slugs (e.g. key "url" with sample "expresta-sro") are routing tokens, not display columns.
+  const leaf = f.key.split(".").pop() ?? f.key;
+  if (/^(url|slug|item_url|path|permalink)$/i.test(leaf) && /^[a-z0-9_-]+$/i.test(f.sample.trim())) return false;
   if (f.sample.length > 180) return false;
   const cell = (k: string, r: Record<string, unknown>) => String(r[k] ?? "").trim().replace(/^["']|["']$/g, "").toLowerCase();
   // The same value on every row (a role, a counter) tells the reader nothing.
@@ -313,15 +336,8 @@ export function visiblePageRows(ws: Workspace, list: PageList | undefined, feed:
 
 /** Canonical on-page row count for a list, accounting for filtered empty slots. */
 export function listRowCount(list: PageList, ws?: Workspace, feed?: Feed): number {
-  if (ws) return visiblePageRows(ws, list, feed).length;
-  const textCols = list.columns.filter((c) => c.fill >= 0.5 && (c.attr === "own" || c.attr === "text" || list.columns.length <= 3));
-  const check = textCols.length ? textCols : list.columns;
-  if (!check.length) return list.count;
-  let count = 0;
-  for (let i = 0; i < list.count; i++) {
-    if (check.some((c) => c.values[i] != null && String(c.values[i]).trim() !== "")) count++;
-  }
-  return count;
+  const effectiveWs = ws ?? openWorkspace(list, feed ? [feed] : []);
+  return visiblePageRows(effectiveWs, list, feed).length;
 }
 
 /**

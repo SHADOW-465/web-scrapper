@@ -108,7 +108,9 @@ export function reducer(s: State, a: Action): State {
       if (pinned) open(pinned.id, openWorkspace(pinned, s.feeds));
       // The page shows a slice of something much bigger: open the data itself.
       else if (richFeed && (!bestList || size(richFeed) >= 3 * reach(bestList))) open(`feed:${richFeed.id}`, openFeedWorkspace(richFeed));
-      else if (bestList) open(bestList.id, openWorkspace(bestList, s.feeds));
+      // On a landing page with a clear directory link and only a tiny (<6 row) table,
+      // don't auto-open the tiny table: let the "No company list found" / directory CTA lead.
+      else if (bestList && !(directoryLinks.length > 0 && !richFeed && reach(bestList) < 6)) open(bestList.id, openWorkspace(bestList, s.feeds));
       else if (richFeed) open(`feed:${richFeed.id}`, openFeedWorkspace(richFeed));
       return { ...s, lists, next: a.next, directoryLinks, ws, active, fresh: null, preferItems: a.prefer?.itemColumns ?? null };
     }

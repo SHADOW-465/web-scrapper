@@ -261,8 +261,8 @@ export async function scan(
 
       await within(page.addScriptTag({ content: extractorJs() }).then(() => undefined), 5_000, undefined);
       const shape = await within(page.evaluate(
-        "(() => { const l = (window.__ss ? window.__ss.detect() : []).filter((x) => !x.nav && !x.chrome); return { lists: l.length, rich: l.some((x) => x.count >= 5 && x.columns.length >= 2), text: document.body.innerText.length }; })()",
-      ) as Promise<{ lists: number; rich: boolean; text: number }>, 10_000, { lists: 0, rich: false, text: 0 });
+        "(() => { const l = (window.__ss ? window.__ss.detect() : []).filter((x) => !x.nav && !x.chrome); const d = window.__ss && window.__ss.findDirectoryLinks ? window.__ss.findDirectoryLinks() : []; return { lists: l.length, rich: l.some((x) => x.count >= 5 && x.columns.length >= 2), dir: d.length > 0, text: document.body.innerText.length }; })()",
+      ) as Promise<{ lists: number; rich: boolean; dir: boolean; text: number }>, 10_000, { lists: 0, rich: false, dir: false, text: 0 });
       listCount = shape.lists;
       // Small lookup lists (countries, halls, filter options) load even when the
       // main data doesn't; only a paginated or wide record set counts as the data.
@@ -273,12 +273,17 @@ export async function scan(
         return findRecordSets(c.payload).some((set) => set.records.length >= 3 && (paged || Object.keys(set.records[0] ?? {}).length >= 6));
       });
       // An app shell still has menus that look like lists, but almost no text.
-      if (feedFound || (shape.rich && shape.text > 1200) || shape.text > 2500) break;
+      if (feedFound || (shape.rich && shape.text > 1200) || (shape.dir && shape.text > 400) || shape.text > 2500) break;
     }
 
     say("Reading what the page shows");
     const title = await within(page.title(), 5_000, "");
     const finalUrl = page.url();
+    if (finalUrl.startsWith("chrome-error:")) {
+      await browser.close().catch(() => undefined);
+      browser = null;
+      return await scanWithoutBrowser(url, opts.cookie, say);
+    }
     const pageText = aiEnabled() ? await within(page.evaluate("document.body.innerText") as Promise<string>, 5_000, "") : "";
     const snap = await within(captureSnapshot(page, extractorJs()), 20_000, null);
     if (!snap) throw new Error("The page took too long to freeze into a snapshot. Try again.");
