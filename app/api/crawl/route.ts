@@ -1,6 +1,7 @@
 import { denied, hasAccess } from "@/lib/access";
 import { crawl, type CrawlPlan } from "@/lib/crawl";
 import { ndjson } from "@/lib/ndjson";
+import { cookieFrom, SessionError } from "@/lib/session";
 import { assertPublicUrl, BlockedUrlError } from "@/lib/ssrf";
 
 export const runtime = "nodejs";
@@ -19,9 +20,15 @@ export async function POST(req: Request) {
   if (!recipe?.itemSelector || !Array.isArray(recipe.fields) || !recipe.fields.length) {
     return Response.json({ error: "bad_recipe", message: "Pick at least one column first." }, { status: 400 });
   }
+  let cookie: string | undefined;
+  try {
+    cookie = cookieFrom(plan as { cookie?: unknown; session?: unknown }, plan.url);
+  } catch (e) {
+    return Response.json({ error: "session", message: e instanceof SessionError ? e.message : "Sign in again." }, { status: 400 });
+  }
   const safe: CrawlPlan = {
     url: plan.url,
-    cookie: typeof plan.cookie === "string" && plan.cookie.trim() ? plan.cookie.slice(0, 8000) : undefined,
+    cookie,
     recipe: {
       itemSelector: String(recipe.itemSelector).slice(0, 2000),
       fields: recipe.fields.slice(0, 60).map((f) => ({ name: String(f.name).slice(0, 80), sel: String(f.sel ?? "").slice(0, 2000), attr: String(f.attr ?? "text"), multi: !!f.multi })),

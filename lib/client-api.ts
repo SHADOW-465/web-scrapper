@@ -44,12 +44,23 @@ export interface ScanResult {
   url: string; finalUrl: string; title: string; snapshot: string; snapshotBytes: number; apis: Feed[]; notes: string[];
 }
 
-export async function scanPage(url: string, cookie: string | undefined, onStatus: (s: string) => void, signal?: AbortSignal): Promise<ScanResult> {
-  const res = await post("/api/scan", { url, cookie }, signal);
+/** Who the server should be on the site as: a pasted cookie, or a sealed session from an earlier sign-in. */
+export interface Auth { cookie?: string; session?: string }
+
+export async function scanPage(
+  url: string,
+  auth: Auth,
+  onStatus: (s: string) => void,
+  signal?: AbortSignal,
+  login?: { username: string; password: string },
+  onSession?: (session: string) => void,
+): Promise<ScanResult> {
+  const res = await post("/api/scan", { url, ...auth, login }, signal);
   let result: ScanResult | null = null;
   let error: ScanError | null = null;
   await readNdjson(res, (e) => {
     if (e.type === "status") onStatus(String(e.text));
+    else if (e.type === "session") onSession?.(String(e.session));
     else if (e.type === "result") result = e as unknown as ScanResult;
     else if (e.type === "error") error = new ScanError(String(e.message), e.kind === "site" ? "site" : "server");
   });
@@ -96,7 +107,7 @@ export async function fetchChunk(token: string, startIndex: number, signal?: Abo
 }
 
 export interface CrawlRequest {
-  url: string; cookie?: string; mode: "next" | "more" | "scroll"; nextSelector?: string; maxPages: number;
+  url: string; cookie?: string; session?: string; mode: "next" | "more" | "scroll"; nextSelector?: string; maxPages: number;
   recipe: { itemSelector: string; fields: Array<{ name: string; sel: string; attr: string; multi?: boolean }> };
 }
 
@@ -121,7 +132,7 @@ export async function crawlPages(
 
 /** Find and sample an item page: what can be read from each row's own page. */
 export async function sampleItems(
-  body: { scanUrl: string; cookie?: string; urls?: string[]; discover?: { hintPaths: string[]; candidates: Array<{ key: string; values: string[] }>; verify: string[] } },
+  body: { scanUrl: string; cookie?: string; session?: string; urls?: string[]; discover?: { hintPaths: string[]; candidates: Array<{ key: string; values: string[] }>; verify: string[] } },
   onStatus: (s: string) => void,
   signal?: AbortSignal,
 ): Promise<{ pattern: ItemSource | null; catalogue: ItemCatalogue } | null> {
@@ -142,7 +153,7 @@ export async function sampleItems(
 
 /** Read a batch of item pages. Addresses not reached in time come back as `pending`. */
 export async function readItemBatch(
-  body: { scanUrl: string; cookie?: string; urls: string[]; spec: ItemSpec },
+  body: { scanUrl: string; cookie?: string; session?: string; urls: string[]; spec: ItemSpec },
   signal?: AbortSignal,
 ): Promise<{ results: ItemResult[]; pending: string[] }> {
   const res = await post("/api/items/read", body, signal);

@@ -216,6 +216,7 @@ async function withRetry<T>(what: string, fn: () => Promise<T>, signal: AbortSig
 export interface RunOptions {
   signal: AbortSignal;
   cookie?: string;
+  session?: string;
   onUpdate: (job: Job, progress: Progress) => void;
 }
 
@@ -290,7 +291,7 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           while (queue.length) {
             const batch = queue.splice(0, batchSize);
             status = "";
-            const out = await withRetry("Reading item pages", () => readItemBatch({ scanUrl: job.scanUrl, cookie: opts.cookie, urls: batch, spec }, signal), signal, wait);
+            const out = await withRetry("Reading item pages", () => readItemBatch({ scanUrl: job.scanUrl, cookie: opts.cookie, session: opts.session, urls: batch, spec }, signal), signal, wait);
             for (const r of out.results) job.results[r.url] = r;
             queue.push(...out.pending); // not reached in that call's time: back in line
             await saveJob(job);

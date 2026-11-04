@@ -1,6 +1,7 @@
 import { denied, hasAccess } from "@/lib/access";
 import { discoverPattern, HeavyPagesError, sampleItemPage } from "@/lib/items";
 import { ndjson } from "@/lib/ndjson";
+import { cookieFrom, SessionError } from "@/lib/session";
 import { assertPublicUrl } from "@/lib/ssrf";
 
 export const runtime = "nodejs";
@@ -31,7 +32,12 @@ export async function POST(req: Request) {
     return Response.json({ error: "bad_url", message: "Scan a page first." }, { status: 400 });
   }
   // A pasted cookie only ever goes back to the site it came from.
-  const cookie = typeof body.cookie === "string" && body.cookie.trim() ? body.cookie.slice(0, 8000) : undefined;
+  let cookie: string | undefined;
+  try {
+    cookie = cookieFrom(body as { cookie?: unknown; session?: unknown }, scan.toString());
+  } catch (e) {
+    return Response.json({ error: "session", message: e instanceof SessionError ? e.message : "Sign in again." }, { status: 400 });
+  }
   const cookieFor = (u: string) => {
     try {
       const h = new URL(u).hostname;

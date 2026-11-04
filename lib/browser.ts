@@ -94,7 +94,12 @@ const NOISE = /google-analytics|googletagmanager|doubleclick|facebook\.net|hotja
  * Open a page with the network guarded: private addresses blocked, heavy
  * assets skipped (the user's own browser loads images in the snapshot).
  */
-export async function openPage(browser: Browser, url: string, cookie?: string): Promise<Page> {
+export async function openPage(
+  browser: Pick<Browser, "newPage" | "setCookie">,
+  url: string,
+  cookie?: string,
+  guard?: (req: HTTPRequest) => "abort" | null,
+): Promise<Page> {
   const page = await browser.newPage();
   await page.setUserAgent(USER_AGENT);
   await page.setExtraHTTPHeaders({ "accept-language": "en-US,en;q=0.9" });
@@ -114,6 +119,7 @@ export async function openPage(browser: Browser, url: string, cookie?: string): 
       } catch {
         return req.abort();
       }
+      if (guard?.(req) === "abort") return req.abort();
       if (isObviouslyInternal(host) || NOISE.test(req.url())) return req.abort();
       if (SKIP_TYPES.has(req.resourceType())) return req.abort();
       if (!(await resolvesPublic(host))) return req.abort();

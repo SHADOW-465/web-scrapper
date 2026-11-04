@@ -173,13 +173,21 @@ const NAMES: Partial<Record<Kind, RegExp>> = {
   description: /\b(about|description|beschreibung|profile|profil|summary|text)\b/i,
   category: /\b(categor\w*|sector|branche|genre|topic|kategorie\w*|segment|tags?)\b/i,
 };
+// Everyday words for what a column is often called on the page.
+const SYNONYMS: Record<string, string[]> = {
+  author: ["name", "by", "writer", "autor"], writer: ["name", "author", "by"], autor: ["name", "author"],
+  title: ["name", "heading", "titel"], price: ["cost", "preis", "amount"], preis: ["price", "cost"], date: ["datum", "when", "time"],
+  rating: ["stars", "score", "bewertung"], tags: ["keywords", "topics", "schlagworte"], quote: ["text"], text: ["description", "body"],
+  location: ["city", "address", "ort"], speaker: ["name"], product: ["name", "title"],
+};
 const JUNK = /\b(id|ids|count|anzahl|sort|order|index|flag|is |has )\b|_id\b/i;
 const SHAPE: Partial<Record<Kind, (v: string) => boolean>> = { email: shape.email, phone: shape.phone, website: shape.domain, hall: shape.hall, booth: shape.booth };
 
 function bestColumn(w: Wish, avail: Available[]): Available | null {
   const kindRe = NAMES[w.kind];
   const looks = SHAPE[w.kind];
-  const words = w.label.toLowerCase().split(/[^a-zà-ž0-9]+/).filter((x) => x.length >= 3 && !/^(the|and|und|der|die|das|number|nummer|name)$/.test(x));
+  const base = w.label.toLowerCase().split(/[^a-zà-ž0-9]+/).filter((x) => x.length >= 3 && !/^(the|and|und|der|die|das|number|nummer|name)$/.test(x));
+  const words = [...new Set([...base, ...base.flatMap((x) => SYNONYMS[x] ?? [])])];
   let best: { a: Available; score: number } | null = null;
   for (const a of avail) {
     if (JUNK.test(` ${a.name} `) && !JUNK.test(` ${w.label} `)) continue;
@@ -188,7 +196,8 @@ function bestColumn(w: Wish, avail: Available[]): Available | null {
     if (name === w.label.toLowerCase()) score += 10;
     if (kindRe?.test(a.name)) score += 6;
     if (w.kind === "company" && /\bname\b/.test(name) && !/\b(first|last|vor|nach|contact|person|team|member|stand|hall)\b/.test(name)) score += 3;
-    const overlap = words.filter((x) => name.split(/[^a-zà-ž0-9]+/).includes(x)).length;
+    const nameWords = name.split(/[^a-zà-ž0-9]+/);
+    const overlap = base.filter((x) => nameWords.includes(x)).length + words.filter((x) => !base.includes(x) && nameWords.includes(x)).length;
     score += overlap * 4;
     if (looks && a.samples.length) {
       const ok = a.samples.filter(looks).length / a.samples.length;
@@ -198,7 +207,9 @@ function bestColumn(w: Wish, avail: Available[]): Available | null {
     if (!a.samples.length) score -= 2;
     if (a.on) score += 1;
     if (a.extra) score -= 1;
-    if (score >= 6 && (!best || score > best.score)) best = { a, score };
+    // A free-form wish ("quote text") is placed by one whole-word match with a column's name.
+    const need = w.kind === "other" ? 5 : 6;
+    if (score >= need && (!best || score > best.score)) best = { a, score };
   }
   return best?.a ?? null;
 }
@@ -479,7 +490,10 @@ export function selfCheck(): string {
   const p4 = followUp(p3, "only the first 20", avail);
   eq([p4.limit, p4.items.length], [20, p3.items.length], "follow-up changes the limit only");
 
+  const q = availableFrom([{ id: "t", name: "Text", ink: "", on: true, sample: "" }, { id: "n", name: "Name", ink: "", on: true, sample: "" }, { id: "g", name: "Tags", ink: "", on: true, sample: "" }],
+    [{ Text: "“The world as we have created it…”", Name: "Albert Einstein", Tags: "change" }], []);
+  eq(resolvePlan(parseRequest("quote text and author"), q).items.map((i) => `${i.label}>${i.source.type === "column" ? i.source.id : "?"}`), ["Quote text>t", "Author>n"], "free-form wishes and synonyms");
   const ai = fromAi({ columns: [{ label: "Firm", source: "field:Name" }, { label: "Boss", source: "person:ceo:name" }, { label: "Secret", source: "field:Password" }], limit: 10 }, avail, "x");
   eq([ai?.items.map((i) => i.label), ai?.unresolved, ai?.limit], [["Firm", "Boss"], ["Secret"], 10], "AI plan checked against real fields");
-  return "wishes ok (25 checks)";
+  return "wishes ok (26 checks)";
 }

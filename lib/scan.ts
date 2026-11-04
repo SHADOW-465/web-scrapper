@@ -13,6 +13,7 @@
 import type { Browser, HTTPResponse } from "puppeteer-core";
 import { parseHTML } from "linkedom";
 import { aiEnabled, extractRecords, nameFields, quotaNotice } from "./ai";
+import { passwordGuard, signIn, type Credentials } from "./login";
 import { extractorJs, launch, nudge, openPage } from "./browser";
 import { detectPagination, findRecordSets, findTotal, flatten, humanizeKey, isPlumbing, type Flat } from "./records";
 import type { Replay } from "./replay";
@@ -186,14 +187,14 @@ async function scanWithoutBrowser(url: string, cookie: string | undefined, say: 
 
 export async function scan(
   url: string,
-  opts: { cookie?: string; status?: (text: string) => void } = {},
+  opts: { cookie?: string; status?: (text: string) => void; login?: Credentials; onSession?: (cookie: string) => void } = {},
 ): Promise<ScanResult> {
   const say = opts.status ?? (() => undefined);
 
   // Data endpoints need not contain /api/ or end in .json. Inspect the response
   // type and release HTML bodies immediately before opening the browser.
   say("Checking the page address");
-  const direct = await readJsonAddress(url, opts.cookie);
+  const direct = opts.login ? null : await readJsonAddress(url, opts.cookie);
   if (direct) return direct;
 
   const notes: string[] = [];
@@ -205,10 +206,21 @@ export async function scan(
     try {
       browser = await launch();
     } catch (e) {
-      console.error("[scan] browser launch failed:", e);
+      console.error("[scan] browser launch failed:", e instanceof Error ? e.message : "unknown error");
+      if (opts.login) throw new SiteReadError("Signing in needs the browser, which couldn't start. Try again in a minute.");
       return await scanWithoutBrowser(url, opts.cookie, say);
     }
-    const page = await openPage(browser, url, opts.cookie);
+    // Signing in happens in an incognito context, and the page is read in that same signed-in context.
+    const ctx = opts.login ? await browser.createBrowserContext() : null;
+    const guard = opts.login ? { state: null as ReturnType<typeof passwordGuard> | null } : null;
+    const page = await openPage(ctx ?? browser, url, opts.cookie, guard ? (req) => guard.state?.check(req) ?? null : undefined);
+    if (opts.login && guard && ctx) {
+      guard.state = passwordGuard(page, url, opts.login.password);
+      await signIn(page, url, opts.login, guard.state, say);
+      const jar = await within(ctx.cookies(), 5_000, [] as Array<{ name: string; value: string; domain: string }>);
+      const header = cookieHeaderFor(jar, url);
+      if (header) opts.onSession?.(header);
+    }
     const pending = new Set<Promise<void>>();
 
     page.on("response", (res: HTTPResponse) => {
@@ -287,7 +299,7 @@ export async function scan(
     const pageText = aiEnabled() ? await within(page.evaluate("document.body.innerText") as Promise<string>, 5_000, "") : "";
     const snap = await within(captureSnapshot(page, extractorJs()), 20_000, null);
     if (!snap) throw new Error("The page took too long to freeze into a snapshot. Try again.");
-    const cookies = await within(browser.cookies(), 5_000, [] as Array<{ name: string; value: string; domain: string }>);
+    const cookies = await within((ctx ?? browser).cookies(), 5_000, [] as Array<{ name: string; value: string; domain: string }>);
 
     say("Matching it to the site's own data");
     const apis: ApiSource[] = [];

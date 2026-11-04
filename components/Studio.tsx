@@ -49,6 +49,12 @@ export default function Studio() {
   const [url, setUrl] = useState("");
   const [cookie, setCookie] = useState("");
   const [cookieOpen, setCookieOpen] = useState(false);
+  // Sign-in: the login ID and password live only in this dialog until sent once; the server
+  // answers with a sealed session (the site's cookies), kept in memory for this tab only.
+  const [session, setSession] = useState<{ token: string; host: string } | null>(null);
+  const [signInMode, setSignInMode] = useState<"password" | "cookie">("password");
+  const [loginId, setLoginId] = useState("");
+  const [password, setPassword] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [status, setStatus] = useState<string[]>([]);
   const [error, setError] = useState("");
@@ -127,7 +133,7 @@ export default function Studio() {
 
   /* -------------------------------------------------------- scanning */
 
-  const startScan = useCallback(async (target: string) => {
+  const startScan = useCallback(async (target: string, login?: { username: string; password: string }) => {
     const u = normalizeUrl(target);
     if (!u) return;
     abort.current?.abort();
@@ -154,7 +160,12 @@ export default function Studio() {
     setTryError(null);
     dispatch({ type: "reset" });
     try {
-      const r = await scanPage(u, cookie.trim() || undefined, (s) => setStatus((p) => [...p, s]), ac.signal);
+      const sameSite = session && hostOf(u).endsWith(session.host);
+      const r = await scanPage(
+        u, { cookie: cookie.trim() || undefined, session: !login && sameSite ? session.token : undefined },
+        (s) => setStatus((p) => [...p, s]), ac.signal, login,
+        (token) => setSession({ token, host: hostOf(u).split(".").slice(-2).join(".") }),
+      );
       if (ac.signal.aborted) return;
       setScan(r);
       dispatch({ type: "scanned", feeds: r.apis });
@@ -167,7 +178,7 @@ export default function Studio() {
       setErrorKind(e instanceof ScanError ? e.kind : "server");
       setPhase("error");
     }
-  }, [cookie]);
+  }, [cookie, session]);
 
   // The snapshot reports its lists once it has laid itself out.
   useEffect(() => {
@@ -281,6 +292,8 @@ export default function Studio() {
   const extras = useMemo(() => (ws ? extraFields(ws, feed) : []), [ws, feed]);
   const onCols = ws?.columns.filter((c) => c.on) ?? [];
   const onNames = onCols.map((c) => c.name);
+  const auth = { cookie: cookie.trim() || undefined, session: session && scan && hostOf(scan.finalUrl).endsWith(session.host) ? session.token : undefined };
+  const signedIn = !!auth.cookie || !!auth.session;
 
   // Decision-makers: pick the company-name column for each dataset, keep the user's choice while it stays valid.
   useEffect(() => {
@@ -289,7 +302,8 @@ export default function Studio() {
       if (cur && onNames.includes(cur.nameCol) && cur.listId === ws.listId) return cur;
       const g = guessLeadColumns(ws.columns, pageRowList);
       if (!g) return cur ? { ...cur, on: false } : null;
-      return { on: cur?.listId === ws.listId ? cur.on : true, ...g, limit: cur?.limit ?? null, aiSearch: cur?.aiSearch ?? 10, listId: ws.listId };
+      // Off until a request asks for decision-makers (or she ticks it): most lists are not company directories.
+      return { on: cur?.listId === ws.listId ? cur.on : false, ...g, limit: cur?.limit ?? null, aiSearch: cur?.aiSearch ?? 10, listId: ws.listId };
     });
   }, [ws?.listId, onNames.join("\u0000"), pageRowList.length]); // eslint-disable-line react-hooks/exhaustive-deps
   const leadsOn = !!leadsCfg?.on && !!ws && onNames.includes(leadsCfg.nameCol);
@@ -350,7 +364,7 @@ export default function Studio() {
     try {
       const res = await sampleItems({
         scanUrl: scan.finalUrl,
-        cookie: cookie.trim() || undefined,
+        ...auth,
         urls: urls.length ? urls : undefined,
         discover: urls.length || !f ? undefined : discoveryRequest(scan.finalUrl, f, extra),
       }, (text) => updateItems({ type: "items", wsId, items: { status: "looking", message: text } }), signal);
@@ -371,7 +385,7 @@ export default function Studio() {
       if (e instanceof SkippedItemsError) return updateItems({ type: "items", wsId, items: { status: "none", message: e.message } });
       updateItems({ type: "items", wsId, items: { status: "error", message: e instanceof Error ? e.message : String(e) } });
     }
-  }, [scan, st.ws, st.lists, st.feeds, cookie]);
+  }, [scan, st.ws, st.lists, st.feeds, cookie, session]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Look once per dataset, as soon as it's open.
   useEffect(() => {
@@ -518,7 +532,7 @@ export default function Studio() {
     try {
       const done = await runJob(job, {
         signal: ac.signal,
-        cookie: cookie.trim() || undefined,
+        ...auth,
         onUpdate: (j, p) => { if (jobAbort.current === ac) setRun({ job: j, progress: p, state: "running" }); },
       });
       if (ac.signal.aborted || jobAbort.current !== ac) return;
@@ -572,7 +586,7 @@ export default function Studio() {
       const pageCols = onCols.filter((c) => c.page);
       const linkCol = ws.items?.source?.columnKey ? activeList.columns.find((c) => c.key === ws.items!.source!.columnKey) : undefined;
       crawl = {
-        url: scan.finalUrl, cookie: cookie.trim() || undefined, mode: crawlMode, nextSelector: st.next?.selector, maxPages,
+        url: scan.finalUrl, ...auth, mode: crawlMode, nextSelector: st.next?.selector, maxPages,
         recipe: {
           itemSelector: activeList.itemSelector,
           fields: [
@@ -583,7 +597,7 @@ export default function Studio() {
       };
     }
     await execute(newJob({
-      title, format, scanUrl: scan.finalUrl, scope, ws, list: activeList, feed, crawl, gated: !!cookie.trim(),
+      title, format, scanUrl: scan.finalUrl, scope, ws, list: activeList, feed, crawl, gated: signedIn,
       // Companies already looked up in a trial run are not looked up again.
       leads: leadsOn && leadsCfg ? newLeadsState(stripCfg(leadsCfg), leadPreview) : undefined,
       plan: plan ?? undefined,
@@ -665,7 +679,22 @@ export default function Studio() {
   const companiesWord = activeList?.name && /aussteller|exhibitor/i.test(activeList.name) ? "exhibitors" : "rows";
 
   function onChatSend(text: string) {
+    // Never let a password typed into the chat travel anywhere (it would reach the AI planner).
+    const SECRET = /(\b(?:pass(?:word|wort)?|pwd|kennwort)(?:\s*[:=]|\s+(?:is|ist|lautet))\s*)\S+/gi;
+    if (SECRET.test(text)) {
+      addMsg({ role: "user", text: text.replace(SECRET, "$1•••") });
+      addMsg({ role: "assistant", tone: "warn", text: "Please don't type passwords in the chat. I've opened the sign-in box: your password goes only to the site's own sign-in form, once, and isn't saved." });
+      setSignInMode("password");
+      setCookieOpen(true);
+      return;
+    }
     addMsg({ role: "user", text });
+    if (/\b(log ?in|sign ?in|anmelden|einloggen|my account|mein konto|members? only|behind a login)\b/i.test(text) && !urlIn(text)) {
+      addMsg({ role: "assistant", text: "Use the sign-in box I've opened (top right): enter your login ID and password there. They're used once to sign in to the site and never saved." });
+      setSignInMode("password");
+      setCookieOpen(true);
+      return;
+    }
     const link = urlIn(text);
     const ask = link ? text.replace(link, "").replace(link.replace(/^https?:\/\//, ""), "").trim() : text.trim();
     const sameSite = link && scan && hostOf(link) === hostOf(scan.finalUrl) && new URL(link).pathname === new URL(scan.finalUrl).pathname;
@@ -852,9 +881,9 @@ export default function Studio() {
             <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Paste a link to any page with a list on it" inputMode="url"
               onBlur={(e) => { e.currentTarget.scrollLeft = 0; }} autoComplete="url" spellCheck={false} />
           </label>
-          <button type="button" className={`btn btn-quiet${cookie ? " on" : ""}`} onClick={() => setCookieOpen((v) => !v)} aria-expanded={cookieOpen} title="Scan a page that needs you to be signed in">
+          <button type="button" className={`btn btn-quiet${cookie || session ? " on" : ""}`} onClick={() => setCookieOpen((v) => !v)} aria-expanded={cookieOpen} title="Scan a page that needs you to be signed in">
             <KeyRound size={15} aria-hidden="true" />
-            <span>{cookie ? "Signed in" : "Signed-in page"}</span>
+            <span>{session ? `Signed in · ${session.host}` : cookie ? "Cookie set" : "Sign in"}</span>
           </button>
           <button className="btn btn-primary" disabled={phase === "scanning"}>
             {phase === "scanning" ? <Loader2 size={16} className="spin" aria-hidden="true" /> : <ArrowRight size={16} aria-hidden="true" />}
@@ -866,19 +895,54 @@ export default function Studio() {
           <Bookmark size={15} aria-hidden="true" />Recipes{recipes.length ? <span className="num" style={{ color: "var(--graphite-3)" }}>{recipes.length}</span> : null}
         </button>
         {cookieOpen && (
-          <div className="cookie" role="dialog" aria-label="Signed-in page">
+          <div className="cookie signin" role="dialog" aria-label="Sign in to a site">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start" }}>
-              <label htmlFor="cookie">Cookie for this site</label>
+              <div className="seg" role="tablist" aria-label="How to sign in">
+                <button role="tab" aria-selected={signInMode === "password"} className={signInMode === "password" ? "on" : ""} onClick={() => setSignInMode("password")}>Login ID &amp; password</button>
+                <button role="tab" aria-selected={signInMode === "cookie"} className={signInMode === "cookie" ? "on" : ""} onClick={() => setSignInMode("cookie")}>Paste a cookie</button>
+              </div>
               <button className="iconbtn" onClick={() => setCookieOpen(false)} aria-label="Close"><X size={16} /></button>
             </div>
-            <p>
-              Sign in to the site in your own browser. Open DevTools, choose <b>Network</b>, reload, click the page request, and copy the <b>Cookie</b> request header. Paste it here. It is sent only to that site, never saved, and never shown again.
-            </p>
-            <textarea id="cookie" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="sessionid=…; token=…" spellCheck={false} />
-            <div style={{ display: "flex", gap: 8, marginTop: 8, justifyContent: "flex-end" }}>
-              {cookie && <button className="btn btn-ghost btn-sm" onClick={() => setCookie("")}>Clear</button>}
-              <button className="btn btn-primary btn-sm" onClick={() => setCookieOpen(false)}>Done</button>
-            </div>
+            {signInMode === "password" ? (
+              <form autoComplete="off" onSubmit={(e) => {
+                e.preventDefault();
+                const target = normalizeUrl(url) || scan?.finalUrl || "";
+                if (!target) return say("Paste the site's address first.");
+                if (!loginId.trim() || !password) return;
+                const creds = { username: loginId.trim(), password };
+                setPassword(""); // the password leaves this tab once, in this request, and is not kept
+                setCookieOpen(false);
+                if (chat.length) {
+                  scanMsg.current = addMsg({ role: "assistant", text: `Signing in to ${hostOf(target)}…`, busy: true });
+                  pendingAsk.current = plan?.request ?? null;
+                }
+                pending.current = null;
+                void startScan(target, creds);
+              }}>
+                {session ? (
+                  <p className="note ok" style={{ margin: "8px 0" }}><Check size={14} aria-hidden="true" /><span>Signed in to {session.host} for this tab. <button type="button" className="linkbtn" onClick={() => setSession(null)}>Sign out</button></span></p>
+                ) : null}
+                <label htmlFor="login-id">Login ID or email</label>
+                <input id="login-id" className="fname" value={loginId} onChange={(e) => setLoginId(e.target.value)} autoComplete="off" spellCheck={false} />
+                <label htmlFor="login-pw">Password</label>
+                <input id="login-pw" className="fname" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="off" />
+                <p>Used once to sign in to <b>{hostOf(normalizeUrl(url) || scan?.finalUrl || "the site")}</b>, then dropped: never saved, logged or shown. It is only typed into that site&rsquo;s own sign-in form. Sites with a CAPTCHA or a one-time code need “Paste a cookie”.</p>
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                  <button type="submit" className="btn btn-primary btn-sm" disabled={!loginId.trim() || !password}>Sign in and read page</button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <p>
+                  Sign in to the site in your own browser. Open DevTools, choose <b>Network</b>, reload, click the page request, and copy the <b>Cookie</b> request header. Paste it here. It is sent only to that site, never saved, and never shown again.
+                </p>
+                <textarea id="cookie" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="sessionid=…; token=…" spellCheck={false} aria-label="Cookie for this site" />
+                <div style={{ display: "flex", gap: 8, marginTop: 8, justifyContent: "flex-end" }}>
+                  {cookie && <button className="btn btn-ghost btn-sm" onClick={() => setCookie("")}>Clear</button>}
+                  <button className="btn btn-primary btn-sm" onClick={() => setCookieOpen(false)}>Done</button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </header>
@@ -976,7 +1040,7 @@ export default function Studio() {
                   companies={expectedRows}
                   findingPages={ws.items?.status === "looking"}
                   hasPages={!!ws.items?.source}
-                  gated={!!cookie.trim()}
+                  gated={signedIn}
                   ai={ai}
                   aiError={aiError}
                   testingAi={testingAi}

@@ -16,9 +16,11 @@ import * as people from "../lib/people";
 import * as company from "../lib/company";
 import * as leads from "../lib/leads";
 import * as wishes from "../lib/wishes";
+import * as login from "../lib/login";
+import * as session from "../lib/session";
 
 let failed = 0;
-for (const [name, mod] of Object.entries({ records, ssrf, token, replay, correlate, exporters, model, items, itemsClient, snapshot, redact, roles, people, leads, wishes })) {
+for (const [name, mod] of Object.entries({ records, ssrf, token, replay, correlate, exporters, model, items, itemsClient, snapshot, redact, roles, people, leads, wishes, login, session })) {
   try {
     console.log("pass ", (mod as { selfCheck: () => string }).selfCheck());
   } catch (e) {

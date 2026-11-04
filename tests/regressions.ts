@@ -59,7 +59,7 @@ try {
   globalThis.fetch = async () => new Response('{"type":"rows","rows":[{"name":"A"}],"page":1}\n');
   await assert.rejects(crawlPages({} as never, {rows:()=>{},status:()=>{}}), /connection dropped/i);
   globalThis.fetch = async () => new Response("internal server error",{status:500});
-  await assert.rejects(scanPage("https://8.8.8.8/",undefined,()=>{}), (e: unknown) => e instanceof HttpError && /Scrape Studio's server/.test(e.message));
+  await assert.rejects(scanPage("https://8.8.8.8/",{},()=>{}), (e: unknown) => e instanceof HttpError && /Scrape Studio's server/.test(e.message));
   console.log("pass interrupted captures and server errors are not reported as success");
 
   calls = 0;

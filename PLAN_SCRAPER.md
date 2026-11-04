@@ -26,8 +26,8 @@ Every long step is batched (≤ 40 s per call) and streamed as NDJSON by a clien
 - **M0 ✅** Groq layer (`lib/groq.ts`), redaction (`lib/redact.ts`), signed-in jobs never written to IndexedDB.
 - **M1 ✅** Buchmesse: feed `POST /api/v1/search/exhibitors`, 4,207 exhibitors, 36 per page; full export of all 4,207 rows verified.
 - **B ✅** Decision-maker lookup: `lib/roles.ts`, `lib/people.ts`, `lib/company.ts`, `lib/leads.ts`, `/api/people`, `/api/ai-status`, job stage `people`, Decision-makers panel in the UI with a 5-company trial. Measured on the 36 exhibitors of page 1 without AI: 28 websites, 9 named decision-makers, 13 company emails, 9 company LinkedIn pages.
-- **A** `lib/wishes.ts`, input box, exact columns, per-field source/confidence.
-- **C** `lib/login.ts`, `lib/session.ts`, sign-in dialog.
+- **A ✅** Chat-style requests (`components/Chat.tsx`, `lib/wishes.ts`, `/api/plan`): link + plain words (EN/DE) -> exactly those columns with source/confidence, follow-up edits, limit and country filter; Groq reads the request when available, rules otherwise.
+- **C ✅** Sign-in with login ID and password (`lib/login.ts`, `lib/session.ts`): incognito context, password guard, sealed 2-hour session in memory only; verified on public practice sites.
 - **Final** Generic check on two other marketplaces; summary.
 
 ## Local testing

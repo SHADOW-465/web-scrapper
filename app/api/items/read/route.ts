@@ -1,6 +1,7 @@
 import { denied, hasAccess } from "@/lib/access";
 import { readItems, type ItemSpec } from "@/lib/items";
 import { ndjson } from "@/lib/ndjson";
+import { cookieFrom, SessionError } from "@/lib/session";
 import { assertPublicUrl } from "@/lib/ssrf";
 
 export const runtime = "nodejs";
@@ -32,7 +33,12 @@ export async function POST(req: Request) {
     fields: spec.fields.slice(0, 60).map((f) => ({ key: String(f.key), sel: String(f.sel ?? "").slice(0, 2000), attr: String(f.attr ?? "text"), multi: !!f.multi, listId: f.listId ? String(f.listId) : undefined })),
   };
   const urls = (body.urls ?? []).filter((u) => typeof u === "string" && /^https?:\/\//i.test(u)).slice(0, safeSpec.mode === "browser" ? 8 : MAX_URLS);
-  const cookie = typeof body.cookie === "string" && body.cookie.trim() ? body.cookie.slice(0, 8000) : undefined;
+  let cookie: string | undefined;
+  try {
+    cookie = cookieFrom(body as { cookie?: unknown; session?: unknown }, scan.toString());
+  } catch (e) {
+    return Response.json({ error: "session", message: e instanceof SessionError ? e.message : "Sign in again." }, { status: 400 });
+  }
   const cookieFor = (u: string) => {
     try {
       const h = new URL(u).hostname;
