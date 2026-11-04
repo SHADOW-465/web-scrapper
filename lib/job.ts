@@ -10,7 +10,7 @@
 import { crawlPages, fetchChunk, HttpError, LockedError, lookupBatch, readItemBatch, type CrawlRequest } from "./client-api";
 import type { Format } from "./exporters";
 import { assemble, specFor, urlsFor, type ItemResult } from "./items-client";
-import { companiesFrom, companyKey, joinLeads, leadFieldNames, type CompanyRef, type LeadsState } from "./leads";
+import { companiesFrom, companyKey, joinLeads, leadFieldNames, type CompanyRef, type LeadResult, type LeadsState } from "./leads";
 import { planFilter, planHeaders, planRows, type Plan } from "./wishes";
 import { feedRows, hasPageContent, pageRows, type Feed, type PageList, type Row, type Workspace } from "./model";
 
@@ -41,7 +41,7 @@ export interface Job extends JobInput {
   id: string;
   createdAt: number;
   updatedAt: number;
-  stage: "rows" | "items" | "people" | "done" | "failed";
+  stage: "rows" | "items" | "people" | "ai" | "done" | "failed";
   raw: Row[];                           // feed rows fetched, or captured rows
   nextIndex: number;                    // feed page to resume from
   total: number | null;
@@ -181,9 +181,10 @@ export const saveJob = (job: Job) => (job.gated ? Promise.resolve(null) : tx("re
 export const deleteJob = (id: string) => tx("readwrite", (s) => s.delete(id));
 export async function loadJobs(): Promise<Job[]> {
   const all = ((await tx("readonly", (s) => s.getAll())) as Job[] | null) ?? [];
-  const week = Date.now() - 7 * 24 * 3600 * 1000;
-  for (const j of all) if (j.updatedAt < week) void deleteJob(j.id);
-  return all.filter((j) => !j.gated && j.updatedAt >= week).sort((a, b) => b.updatedAt - a.updatedAt);
+  // Unfinished exports are kept a week; one waiting for AI across days is kept 30 days.
+  const keep = (j: Job) => j.updatedAt >= Date.now() - (j.stage === "ai" ? 30 : 7) * 24 * 3600 * 1000;
+  for (const j of all) if (!keep(j)) void deleteJob(j.id);
+  return all.filter((j) => !j.gated && keep(j)).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /* ------------------------------------------------------------ running */
@@ -340,7 +341,7 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           // A daily limit stops AI for the rest of the run (and is shown); a per-minute one only skips this batch.
           if (out.ai.quotaMessage && out.ai.quotaScope !== "minute") L.quotaMessage = out.ai.quotaMessage;
           for (const n of out.notices) if (!L.notices.includes(n) && L.notices.length < 5) L.notices.push(n);
-          for (const r of out.results) L.results[r.id] = r;
+          for (const r of out.results) L.results[r.id] = mergeLead(L.results[r.id], r);
           for (const id of out.pending) {
             const c = batch.find((b) => b.id === id);
             if (!c) continue;
@@ -353,7 +354,63 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           report();
         }
       }));
-      job.stage = "done";
+      job.stage = needingAi(job).length ? "ai" : "done";
+      if (job.stage === "ai") L.aiTotal = needingAi(job).length;
+      await saveJob(job);
+    }
+
+    // The AI pass: website searches and name reading that the free limits didn't allow yet.
+    // It runs whenever AI is available, across days if need be; on a daily limit it stops and waits.
+    if (job.stage === "ai" && job.leads) {
+      const L = job.leads;
+      L.aiAttempts ??= {};
+      let fairHost: string | undefined;
+      try {
+        fairHost = new URL(job.scanUrl).hostname;
+      } catch {
+        fairHost = undefined;
+      }
+      for (;;) {
+        if (L.aiWaitUntil && L.aiWaitUntil > Date.now()) break; // waiting for the free limit to reset
+        L.aiWaitUntil = undefined;
+        L.quotaMessage = undefined;
+        const queue = needingAi(job);
+        if (!queue.length) {
+          job.stage = "done";
+          break;
+        }
+        const batch = queue.slice(0, 4); // AI-bound: small batches, one at a time
+        const searches = batch.filter((c) => L.results[c.id]?.needsAi?.includes("search")).length;
+        status = "";
+        const out = await withRetry("AI pass", () => lookupBatch({ companies: batch, fairHost, useAi: true, aiSearch: Math.min(2, searches) }, signal), signal, wait);
+        L.aiRequests += out.ai.requests;
+        L.aiTokens += out.ai.tokens;
+        L.aiSearchesUsed += out.ai.searches;
+        for (const r of out.results) L.results[r.id] = mergeLead(L.results[r.id], r, true);
+        for (const c of batch) {
+          if (!L.results[c.id]?.needsAi?.length) continue;
+          L.aiAttempts[c.id] = (L.aiAttempts[c.id] ?? 0) + 1;
+          if (L.aiAttempts[c.id] >= 3) L.results[c.id] = { ...L.results[c.id], needsAi: undefined, notes: [...L.results[c.id].notes, "AI was tried three times without an answer."] };
+        }
+        if (out.ai.quotaScope === "day" || (!out.ai.enabled && out.ai.requests === 0)) {
+          if (!out.ai.enabled) {
+            // AI is not configured on the server: nothing to wait for.
+            for (const c of needingAi(job)) L.results[c.id] = { ...L.results[c.id], needsAi: undefined };
+            continue;
+          }
+          L.aiWaitUntil = Date.now() + Math.max(15 * 60, out.ai.quotaResetIn ?? 3600) * 1000;
+          L.quotaMessage = out.ai.quotaMessage;
+          await saveJob(job);
+          report();
+          break;
+        }
+        await saveJob(job);
+        report();
+        if (out.ai.quotaScope === "minute") {
+          wait("The free AI per-minute limit was reached. Continuing in a minute");
+          await sleep(60_000, signal);
+        }
+      }
       await saveJob(job);
     }
     report();
@@ -370,6 +427,42 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
   }
 }
 
+/** Companies of this job whose AI work (website search, name reading) is still to do. */
+export function needingAi(job: Job): CompanyRef[] {
+  const L = job.leads;
+  if (!L) return [];
+  return companiesOf(job).filter((c) => L.results[c.id]?.needsAi?.length);
+}
+
+/**
+ * A new lookup result over an earlier one: never lose what was found before. With `fromAiPass`,
+ * the new `needsAi` replaces the old (cleared when AI did its part).
+ */
+export function mergeLead(old: LeadResult | undefined, next: LeadResult, fromAiPass = false): LeadResult {
+  if (!old) return next;
+  const merged: LeadResult = {
+    ...old,
+    ...next,
+    website: next.website ?? old.website,
+    websiteSource: next.website ? next.websiteSource : old.websiteSource,
+    people: next.people.length ? next.people : old.people,
+    companyEmail: next.companyEmail ?? old.companyEmail,
+    companyEmailSource: next.companyEmail ? next.companyEmailSource : old.companyEmailSource,
+    companyPhone: next.companyPhone ?? old.companyPhone,
+    companyPhoneSource: next.companyPhone ? next.companyPhoneSource : old.companyPhoneSource,
+    companyLinkedin: next.companyLinkedin ?? old.companyLinkedin,
+    pages: [...new Set([...old.pages, ...next.pages])],
+    notes: next.notes,
+  };
+  merged.needsAi = fromAiPass || next.needsAi ? next.needsAi : old.needsAi;
+  // Found what AI was needed for: nothing left to do.
+  if (merged.needsAi) {
+    merged.needsAi = merged.needsAi.filter((n) => (n === "search" ? !merged.website : !merged.people.length));
+    if (!merged.needsAi.length) merged.needsAi = undefined;
+  }
+  return merged;
+}
+
 export function progressOf(job: Job, status = ""): Progress {
   if (job.stage === "rows") {
     const label = status || (job.scope === "crawl" ? `Page ${job.pages || 1}` : `Fetching rows, page ${job.nextIndex + 1}`);
@@ -384,6 +477,12 @@ export function progressOf(job: Job, status = ""): Progress {
     const companies = companiesOf(job);
     const done = companies.filter((c) => job.leads!.results[c.id]).length;
     return { stage: "people", label: status || "Looking up each company's decision-makers", done, of: companies.length };
+  }
+  if (job.stage === "ai" && job.leads) {
+    const left = needingAi(job).length;
+    const total = Math.max(job.leads.aiTotal ?? left, left);
+    const waiting = job.leads.aiWaitUntil && job.leads.aiWaitUntil > Date.now();
+    return { stage: "ai", label: status || (waiting ? "Waiting for the free AI limit to reset" : "AI pass: finding missing websites and reading names"), done: total - left, of: total };
   }
   return { stage: job.stage, label: status, done: 0, of: null };
 }

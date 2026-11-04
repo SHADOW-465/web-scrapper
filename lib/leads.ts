@@ -29,6 +29,10 @@ export interface LeadsState {
   aiTokens: number;
   quotaMessage?: string;              // Groq 429, shown to the user as is
   notices: string[];
+  /** The AI pass: companies that still need AI are retried whenever the free limits allow. */
+  aiTotal?: number;                   // companies that needed AI when the pass began
+  aiWaitUntil?: number;               // daily limit hit: continue at about this time
+  aiAttempts?: Record<string, number>;
 }
 
 export interface CompanyRef { id: string; name: string; country?: string; website?: string; profileUrl?: string }

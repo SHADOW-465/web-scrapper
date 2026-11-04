@@ -1,6 +1,6 @@
 import { denied, hasAccess } from "@/lib/access";
 import { aiWebsiteCandidates, fetchPage, lookupCompany, publicResult, resolveHardCases, type CompanyInput, type CompanyResult, type WebsiteSearch } from "@/lib/company";
-import { AiQuotaError, aiEnabled, takeUsage } from "@/lib/groq";
+import { AiQuotaError, aiEnabled, searchEnabled, takeUsage } from "@/lib/groq";
 import { ndjson } from "@/lib/ndjson";
 import { safeMessage } from "@/lib/redact";
 
@@ -48,10 +48,15 @@ export async function POST(req: Request) {
     let searchesUsed = 0;
     // AI web search, one at a time (8K tokens/min on the free tier), only while budget, time and quota allow.
     let searchLock: Promise<unknown> = Promise.resolve();
-    const search: WebsiteSearch | undefined = searchesLeft
+    // Companies whose website search was wanted but not done (no budget, a limit, out of time): queued for later.
+    const searchSkipped = new Set<string>();
+    const search: WebsiteSearch | undefined = searchEnabled()
       ? (name, country) => {
           const next = searchLock.then(async () => {
-            if (searchesLeft <= 0 || quota || Date.now() > deadline - 15_000) return [];
+            if (!useAi || searchesLeft <= 0 || (quota && quotaScope === "day") || Date.now() > deadline - 15_000) {
+              searchSkipped.add(name);
+              return [];
+            }
             searchesLeft--;
             searchesUsed++;
             try {
@@ -60,6 +65,7 @@ export async function POST(req: Request) {
               if (e instanceof AiQuotaError) {
                 quota = e.message;
                 quotaScope = e.scope;
+                searchSkipped.add(name);
               } else emit({ type: "notice", message: `AI web search failed: ${safeMessage(e)}` });
               return [];
             }
@@ -100,11 +106,12 @@ export async function POST(req: Request) {
     );
     queue.unshift(...late);
 
-    // Hard cases: one Groq request for the companies where code found a role but no clear name.
-    if (useAi && !quota && Date.now() < deadline + 10_000) {
+    // Hard cases: AI reads names where code found a role but no clear name (10 companies per request).
+    const namesRead = new Set<string>();
+    if (useAi && !(quota && quotaScope === "day") && Date.now() < deadline + 10_000) {
       try {
         const before = done.map((d) => d.people.length);
-        await resolveHardCases(done);
+        await resolveHardCases(done, (ids) => ids.forEach((id) => namesRead.add(id)));
         done.forEach((d, i) => {
           if (d.people.length > before[i]) emit({ type: "company", ...publicResult(d) }); // the updated row replaces the earlier one
         });
@@ -112,8 +119,16 @@ export async function POST(req: Request) {
         if (e instanceof AiQuotaError) {
           quota = e.message; // shown to the user, not hidden
           quotaScope = e.scope;
-        }
-        else emit({ type: "notice", message: `AI step skipped: ${safeMessage(e)}` });
+        } else emit({ type: "notice", message: `AI step skipped: ${safeMessage(e)}` });
+      }
+    }
+    // What AI still has to do, per company: sent so the browser can queue it for when the limits allow.
+    if (aiEnabled()) {
+      for (const d of done) {
+        const needs: Array<"search" | "names"> = [];
+        if (!d.website && searchSkipped.has(d.name)) needs.push("search");
+        if (!d.people.length && d._hard?.length && !namesRead.has(d.id)) needs.push("names");
+        if (needs.length) emit({ type: "company", ...publicResult(d), needsAi: needs });
       }
     }
     emit({ type: "ai", enabled: aiEnabled(), quotaMessage: quota, quotaScope, searches: searchesUsed, ...takeUsage() });

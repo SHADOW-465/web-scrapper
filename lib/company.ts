@@ -31,6 +31,8 @@ export interface CompanyResult {
   companyLinkedin?: string;
   pages: string[];
   notes: string[];
+  /** AI work still to do for this company when the free limits allow: a web search for its website, or reading a name. */
+  needsAi?: Array<"search" | "names">;
   /** Kept for the AI step; stripped before the result is sent to the browser. */
   _hard?: Array<{ url: string; text: string; lines: string[] }>;
 }
@@ -413,9 +415,24 @@ const snippet = (text: string, line: string) => {
  * code could not isolate a name. Everything returned is checked against the page
  * text; anything not written there is dropped.
  */
-export async function resolveHardCases(results: CompanyResult[]): Promise<number> {
-  const todo = results.filter((r) => !r.people.length && r._hard?.length).slice(0, 10);
-  if (!todo.length || !aiEnabled()) return 0;
+/**
+ * AI reads names for companies whose pages mention a role but code couldn't isolate the name:
+ * 10 companies per request, all of them. Returns the ids it read (whatever it found);
+ * on a rate limit the error is thrown and the rest stay unread.
+ */
+export async function resolveHardCases(results: CompanyResult[], onDone?: (ids: string[]) => void): Promise<number> {
+  const all = results.filter((r) => !r.people.length && r._hard?.length);
+  if (!all.length || !aiEnabled()) return 0;
+  let found = 0;
+  for (let i = 0; i < all.length; i += 10) {
+    const chunk = all.slice(i, i + 10);
+    found += await resolveChunk(chunk);
+    onDone?.(chunk.map((c) => c.id));
+  }
+  return found;
+}
+
+async function resolveChunk(todo: CompanyResult[]): Promise<number> {
   const payload = todo.map((r) => ({
     id: r.id,
     text: (r._hard ?? []).map((h) => snippet(h.text, h.lines[0])).join("\n---\n").slice(0, 700),

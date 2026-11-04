@@ -1,5 +1,5 @@
 import { denied, hasAccess } from "@/lib/access";
-import { AiQuotaError, aiEnabled, groqJson, takeUsage } from "@/lib/groq";
+import { AiQuotaError, aiEnabled, groqJson, lastAnsweredBy, takeUsage } from "@/lib/groq";
 import { safeMessage } from "@/lib/redact";
 
 export const runtime = "nodejs";
@@ -45,7 +45,7 @@ export async function POST(req: Request) {
   ].filter(Boolean).join("\n");
   try {
     const ai = await groqJson<Record<string, unknown>>("plan", SYSTEM, user, { maxTokens: 1500 });
-    return Response.json({ ai, usage: takeUsage() }, { headers: { "cache-control": "no-store" } });
+    return Response.json({ ai, by: lastAnsweredBy(), usage: takeUsage() }, { headers: { "cache-control": "no-store" } });
   } catch (e) {
     if (e instanceof AiQuotaError) return Response.json({ ai: null, reason: "quota", message: e.message, quotaScope: e.scope, usage: { ...takeUsage(), quotaScope: e.scope, quotaMessage: e.message } });
     return Response.json({ ai: null, reason: "error", message: safeMessage(e) });

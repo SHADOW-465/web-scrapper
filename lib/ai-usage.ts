@@ -8,6 +8,7 @@
  */
 export const FREE_TOKENS_PER_DAY = 200_000;   // per model, Groq free tier (gpt-oss-20b and -120b)
 export const FREE_REQUESTS_PER_DAY = 1_000;   // per model
+export const OPENROUTER_FREE_PER_DAY = 50;    // free-model requests a day (1,000 once $10 of credits were ever bought)
 
 export interface ModelLimits { remainingRequests?: number; limitRequests?: number; dayTokensUsed?: number; dayTokensLimit?: number; at: number }
 export interface AiDay {
@@ -19,6 +20,9 @@ export interface AiDay {
   limits: Record<string, ModelLimits>;
   dayLimitUntil?: number;     // a daily 429 was seen: AI is unavailable until about then
   dayLimitMessage?: string;
+  orModels?: string[];        // OpenRouter fallback, when configured
+  orRequests?: number;        // OpenRouter requests made today from this browser
+  orDaily?: { used?: number; limit?: number }; // OpenRouter's own count, when it reports one
 }
 
 const KEY = "ss-ai-usage";
@@ -52,8 +56,27 @@ export function noteAi(e: Record<string, unknown> | undefined | null) {
   d.requests += Number(e.requests) || 0;
   d.searches += Number(e.searches) || 0;
   if (Array.isArray(e.models) && e.models.length) d.models = e.models.map(String);
+  const or = e.openrouter as { models?: string[]; requests?: number; daily?: { used?: number; limit?: number } } | undefined;
+  if (or) {
+    if (Array.isArray(or.models)) d.orModels = or.models.map(String);
+    d.orRequests = (d.orRequests ?? 0) + (Number(or.requests) || 0);
+    if (or.daily && (or.daily.used != null || or.daily.limit != null)) d.orDaily = or.daily;
+  }
   const limits = (e.limits ?? {}) as Record<string, ModelLimits>;
-  for (const [m, l] of Object.entries(limits)) if (l && typeof l === "object") d.limits[m] = { ...d.limits[m], ...l };
+  for (const [m, l] of Object.entries(limits)) {
+    if (!l || typeof l !== "object") continue;
+    const merged: ModelLimits = { ...d.limits[m], ...l };
+    // The model answered again without a daily figure: its old "used up" figure no longer holds.
+    if (l.dayTokensUsed == null && l.remainingRequests != null) {
+      delete merged.dayTokensUsed;
+      delete merged.dayTokensLimit;
+    }
+    d.limits[m] = merged;
+  }
+  if (Object.values(limits).some((l) => l && l.dayTokensUsed == null && l.remainingRequests != null) && !(e.quotaScope === "day" || (e.quota as { scope?: string } | null)?.scope === "day")) {
+    d.dayLimitUntil = undefined; // AI answered again
+    d.dayLimitMessage = undefined;
+  }
   const q = (e.quota ?? null) as { scope?: string; resetInSeconds?: number; message?: string } | null;
   const scope = (e.quotaScope as string | undefined) ?? q?.scope;
   const message = (e.quotaMessage as string | undefined) ?? q?.message;

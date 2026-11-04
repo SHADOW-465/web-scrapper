@@ -27,7 +27,7 @@ type Phase = "idle" | "scanning" | "ready" | "error" | "locked";
 interface Run {
   job: Job;
   progress: Progress;
-  state: "running" | "done" | "error" | "stopped";
+  state: "running" | "done" | "error" | "stopped" | "waiting"; // waiting: everything done except AI work, which continues when the free limit resets
   message?: string;
 }
 
@@ -135,6 +135,21 @@ export default function Studio() {
       else aiStatus().then(setAi, (e) => setAiError(e instanceof Error ? e.message : String(e)));
     }).catch(() => undefined);
   }, [refreshResumable]);
+
+  // Exports waiting for AI continue by themselves when the free limit has reset (while any tab of the app is open).
+  useEffect(() => {
+    if (run?.state === "running") return;
+    const waiting = [...(run?.state === "waiting" ? [run.job] : []), ...resumable.filter((j) => j.stage === "ai" && j.id !== run?.job.id)];
+    if (!waiting.length) return;
+    const next = waiting.reduce((a, b) => ((a.leads?.aiWaitUntil ?? 0) <= (b.leads?.aiWaitUntil ?? 0) ? a : b));
+    const due = Math.max(0, (next.leads?.aiWaitUntil ?? 0) - Date.now()) + 5_000;
+    const t = window.setTimeout(() => {
+      if (jobAbort.current && !jobAbort.current.signal.aborted && run?.state === "running") return;
+      if (next.leads) next.leads.aiWaitUntil = undefined;
+      void execute(next, { download: false });
+    }, Math.min(due, 2_000_000_000));
+    return () => window.clearTimeout(t);
+  }, [run?.state, run?.job.id, resumable]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* -------------------------------------------------------- scanning */
 
@@ -496,6 +511,7 @@ export default function Studio() {
       const id = runMsg.current;
       runMsg.current = null;
       if (run.state === "done") updateMsg(id, { busy: false, progress: undefined, tone: "ok", text: run.message ?? "Done.", actions: [{ id: "download-xlsx", label: "Download Excel again" }, { id: "download-csv", label: "CSV" }] });
+      else if (run.state === "waiting") updateMsg(id, { busy: false, progress: undefined, tone: "warn", text: run.message ?? "Waiting for AI.", actions: [{ id: "download-xlsx", label: "Download now (Excel)", primary: true }, { id: "download-csv", label: "CSV" }, { id: "ai-now", label: "Try AI now" }] });
       else if (run.state === "stopped") updateMsg(id, { busy: false, progress: undefined, tone: "warn", text: run.message ?? "Paused.", actions: [{ id: "resume", label: "Resume", primary: true }] });
       else updateMsg(id, { busy: false, progress: undefined, tone: "err", text: run.message ?? "The export stopped.", actions: [{ id: "resume", label: "Retry from where it stopped", primary: true }] });
     }
@@ -578,6 +594,11 @@ export default function Studio() {
         onUpdate: (j, p) => { if (jobAbort.current === ac) setRun({ job: j, progress: p, state: "running" }); },
       });
       if (ac.signal.aborted || jobAbort.current !== ac) return;
+      if (done.stage === "ai") {
+        // Every company is looked up; the AI part continues when the free limit resets. The job stays saved.
+        setRun({ job: done, progress: progressOf(done), state: "waiting", message: waitingMessage(done) });
+        return;
+      }
       // Runs started from the chat finish with download buttons instead of a surprise download.
       const saved = opts.download === false ? null : await deliver(done);
       const count = saved?.count ?? finalRows(done).length;
@@ -618,7 +639,7 @@ export default function Studio() {
       return say(msg);
     }
     // The last run already has these rows and item pages: just write the file again.
-    if (runMatches && run?.state === "done" && JSON.stringify(specFor(run.job.ws)?.fields.map((f) => f.key)) === JSON.stringify(spec?.fields.map((f) => f.key))) {
+    if (runMatches && (run?.state === "done" || run?.state === "waiting") && JSON.stringify(specFor(run.job.ws)?.fields.map((f) => f.key)) === JSON.stringify(spec?.fields.map((f) => f.key))) {
       const { count, filename } = await deliver({ ...run.job, ws, format, title });
       const msg = `${fmtN(count)} rows saved to ${filename}`;
       setDoneNote(`${msg}. Pick another format to download again.`);
@@ -780,7 +801,7 @@ export default function Studio() {
       }, abort.current?.signal);
       const viaAi = answer.ai ? fromAi(answer.ai, avail, prev ? `${prev.request}\n${text}` : text, prev ?? undefined) : null;
       next = viaAi ?? rules;
-      how = viaAi ? "Understood by AI (Groq)." : answer.reason === "quota" ? `Understood by the built-in rules: ${answer.message}` : answer.reason === "off" ? "Understood by the built-in rules (AI is off)." : `Understood by the built-in rules (AI didn't answer: ${answer.message}).`;
+      how = viaAi ? `Understood by AI (${answer.by && answer.by !== "cache" ? answer.by : "from an earlier answer"}).` : answer.reason === "quota" ? `Understood by the built-in rules: ${answer.message}` : answer.reason === "off" ? "Understood by the built-in rules (AI is off)." : `Understood by the built-in rules (AI didn't answer: ${answer.message}).`;
       if (answer.reason === "quota") setAi((a) => (a ? { ...a, ok: false, message: answer.message } : a));
     } catch (e) {
       setPlanning(false);
@@ -860,6 +881,12 @@ export default function Studio() {
       void deliver({ ...run.job, ws, format: id === "ready-xlsx" ? "xlsx" : "csv" }).then(({ count, filename }) => say(`${fmtN(count)} rows so far saved to ${filename}`));
     }
     else if (id === "pause") jobAbort.current?.abort();
+    else if (id === "ai-now" && run?.job.leads) {
+      // Check now whether the limit has reset (one request); if not, it waits again.
+      run.job.leads.aiWaitUntil = undefined;
+      runMsg.current = null;
+      void execute(run.job, { download: false });
+    }
     else if (id === "try") setTrialWanted(true);
     else if (id === "retry-scan") void startScan(url);
     else if (id === "resume" && run) void execute(run.job, { download: false });
@@ -903,20 +930,22 @@ export default function Studio() {
   const pct = busy && p?.of ? Math.min(100, (p.done / p.of) * 100) : 0;
   const hasItemCols = onCols.some((c) => c.item);
   const exportLabel =
-    runMatches && run?.state === "done" ? `Download ${fmtN(rows.length)} rows` :
+    runMatches && (run?.state === "done" || run?.state === "waiting") ? `Download ${fmtN(rows.length)} rows` :
     plan ? `Get ${plan.limit ? `the first ${fmtN(plan.limit)}` : "all"}${plan.country ? ` from ${plan.country}` : ""}${needsLookup(plan) ? " + decision-makers" : ""}` :
     leadsOn ? (scope === "page" ? `Get ${fmtN(onPage)} rows + decision-makers` : scope === "feed" && feed?.total ? `Get all ${fmtN(feed.total)} + decision-makers` : "Get rows + decision-makers") :
     scope === "page" ? (hasItemCols ? `Get ${fmtN(onPage)} rows` : `Export ${fmtN(onPage)} rows`) :
     scope === "feed" ? (feed?.total ? `Get all ${fmtN(feed.total)} rows` : "Get every page") :
     "Capture pages and export";
   const pageOnlyNames = ws ? pageOnly(ws).map((c) => c.name) : [];
-  const detachedRun = run && (run.state === "running" || run.state === "stopped" || run.state === "error") && !runMatches;
+  // An export not shown on the current page (another site, or resumed from an earlier visit) lives in the banner, done ones included.
+  const detachedRun = run && !runMatches;
 
   const jobCard = (
     <JobBanner
       run={detachedRun ? run : null}
       resumable={resumable.filter((j) => j.id !== run?.job.id)}
-      onResume={(j) => void execute(j)}
+      onResume={(j) => { if (j.leads) j.leads.aiWaitUntil = undefined; void execute(j, { download: false }); }}
+      onDownload={(j, f) => void deliver({ ...j, format: f }).then(({ count, filename }) => say(`${fmtN(count)} rows saved to ${filename}`))}
       onDiscard={async (j) => { await deleteJob(j.id); void refreshResumable(); }}
       onStop={() => jobAbort.current?.abort()}
     />
@@ -1189,12 +1218,13 @@ export default function Studio() {
 }
 
 /** Unfinished exports (resume or discard), and progress of one running away from its page. */
-function JobBanner({ run, resumable, onResume, onDiscard, onStop }: {
+function JobBanner({ run, resumable, onResume, onDiscard, onStop, onDownload }: {
   run: Run | null;
   resumable: Job[];
   onResume: (j: Job) => void;
   onDiscard: (j: Job) => void;
   onStop: () => void;
+  onDownload: (j: Job, format: Format) => void;
 }) {
   if (!run && !resumable.length) return null;
   return (
@@ -1205,9 +1235,14 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop }: {
             <b>{run.job.title}</b>
             <span>{run.state === "running" ? `${run.progress.label}: ${fmtN(run.progress.done)}${run.progress.of ? ` of ${fmtN(run.progress.of)}` : ""}` : run.message}</span>
           </div>
-          {run.state === "running"
-            ? <button className="btn btn-quiet btn-sm" onClick={onStop}>Pause</button>
-            : <button className="btn btn-quiet btn-sm" onClick={() => onResume(run.job)}><RotateCcw size={13} aria-hidden="true" />Resume</button>}
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {(run.state === "waiting" || run.state === "done" || run.job.stage === "people" || run.job.stage === "ai") && (
+              <button className="btn btn-quiet btn-sm" onClick={() => onDownload(run.job, "xlsx")}><Download size={13} aria-hidden="true" />Excel</button>
+            )}
+            {run.state === "running"
+              ? <button className="btn btn-quiet btn-sm" onClick={onStop}>Pause</button>
+              : run.state !== "done" && <button className="btn btn-quiet btn-sm" onClick={() => onResume(run.job)}><RotateCcw size={13} aria-hidden="true" />{run.state === "waiting" ? "Try AI now" : "Resume"}</button>}
+          </div>
         </div>
       )}
       {resumable.map((j) => {
@@ -1215,11 +1250,14 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop }: {
         return (
           <div className="jobrow" key={j.id}>
             <div style={{ minWidth: 0 }}>
-              <b>Unfinished: {j.title}</b>
-              <span>{pr.stage === "items" ? `Item pages ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : pr.stage === "people" ? `Companies looked up ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : `${fmtN(j.raw.length)} rows so far`} · {new Date(j.updatedAt).toLocaleString()}</span>
+              <b>{pr.stage === "ai" ? "Waiting for AI" : "Unfinished"}: {j.title}</b>
+              <span>{pr.stage === "ai"
+                ? `${fmtN((pr.of ?? 0) - pr.done)} ${(pr.of ?? 0) - pr.done === 1 ? "company still needs" : "companies still need"} AI${j.leads?.aiWaitUntil && j.leads.aiWaitUntil > Date.now() ? ` · continues by itself around ${new Date(j.leads.aiWaitUntil).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : " · continuing"}`
+                : `${pr.stage === "items" ? `Item pages ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : pr.stage === "people" ? `Companies looked up ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : `${fmtN(j.raw.length)} rows so far`} · ${new Date(j.updatedAt).toLocaleString()}`}</span>
             </div>
             <div style={{ display: "flex", gap: 4 }}>
-              <button className="btn btn-quiet btn-sm" onClick={() => onResume(j)}><RotateCcw size={13} aria-hidden="true" />Resume</button>
+              {(pr.stage === "ai" || pr.stage === "people") && <button className="btn btn-quiet btn-sm" onClick={() => onDownload(j, "xlsx")}><Download size={13} aria-hidden="true" />Excel</button>}
+              <button className="btn btn-quiet btn-sm" onClick={() => onResume(j)}><RotateCcw size={13} aria-hidden="true" />{pr.stage === "ai" ? "Try AI now" : "Resume"}</button>
               <button className="iconbtn" onClick={() => onDiscard(j)} aria-label={`Discard ${j.title}`}><Trash2 size={15} /></button>
             </div>
           </div>
@@ -1227,6 +1265,19 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop }: {
       })}
     </section>
   );
+}
+
+/** What a job waiting for AI tells the user. */
+function waitingMessage(job: Job): string {
+  const L = job.leads;
+  const left = L ? Object.values(L.results).filter((r) => r.needsAi?.length).length : 0;
+  const at = L?.aiWaitUntil ? new Date(L.aiWaitUntil).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : "soon";
+  return [
+    `Every company is looked up.${leadSummary(job)}`,
+    `${fmtN(left)} ${left === 1 ? "company still needs" : "companies still need"} AI (finding a website, or reading a name), and today's free AI limit is used up.`,
+    `They continue by themselves around ${at}, whenever this site is open in a tab, and on later days until all are done. Nothing is lost if you close it: it picks up when you come back.`,
+    "You can download the file now; it has everything found so far.",
+  ].join("\n");
 }
 
 /** The config saved with a job (the UI-only listId is dropped). */

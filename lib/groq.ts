@@ -1,29 +1,52 @@
 /**
- * Groq client for every AI call. Free-tier models only.
+ * AI client for every AI call. Free tiers only. Keys come from the environment only and are never logged.
  *
- *   GROQ_API_KEY         required for any AI (read from the environment only, never logged)
+ *   GROQ_API_KEY         Groq (first choice; the only one with free web search)
  *   GROQ_MODEL           primary   (default openai/gpt-oss-20b)
  *   GROQ_FALLBACK_MODEL  fallback  (default openai/gpt-oss-120b)
+ *   OPENROUTER_API_KEY   OpenRouter free models, used when Groq is limited or failing (JSON tasks only:
+ *                        OpenRouter's web search costs money even on free models)
+ *   OPENROUTER_MODELS    comma-separated (default google/gemma-4-31b-it:free,openrouter/free)
  *
  * Rate limits are never hidden: a 429 that cannot be waited out is thrown as
  * AiQuotaError and shown to the user, with the time until the limit resets.
  */
 import { scrub } from "./redact";
 
-// GROQ_BASE_URL lets local tests point at a fake Groq; it is ignored in production so the key only ever goes to Groq.
-const ENDPOINT = `${(process.env.NODE_ENV !== "production" && !process.env.VERCEL && process.env.GROQ_BASE_URL) || "https://api.groq.com/openai/v1"}/chat/completions`;
+// *_BASE_URL let local tests point at fakes; ignored in production so keys only ever go to the real services.
+const testBase = (v: string | undefined) => (process.env.NODE_ENV !== "production" && !process.env.VERCEL ? v : undefined);
+const GROQ_ENDPOINT = () => `${testBase(process.env.GROQ_BASE_URL) || "https://api.groq.com/openai/v1"}/chat/completions`;
+const OR_BASE = () => testBase(process.env.OPENROUTER_BASE_URL) || "https://openrouter.ai/api/v1";
 const MAX_WAIT_S = 20; // wait this long for a per-minute limit; anything longer is a different model's turn
 
-export const aiEnabled = () => !!process.env.GROQ_API_KEY;
-export const models = () => [
+export type Provider = "groq" | "openrouter";
+export interface Candidate { provider: Provider; model: string }
+
+/** Groq's models (their free daily tokens are what the "AI left today" bar measures). */
+export const models = () => (process.env.GROQ_API_KEY ? [
   process.env.GROQ_MODEL || "openai/gpt-oss-20b",
   process.env.GROQ_FALLBACK_MODEL || "openai/gpt-oss-120b",
-].filter((m, i, a) => a.indexOf(m) === i);
+].filter((m, i, a) => a.indexOf(m) === i) : []);
+export const openrouterModels = () => (process.env.OPENROUTER_API_KEY
+  ? (process.env.OPENROUTER_MODELS || "google/gemma-4-31b-it:free,openrouter/free").split(",").map((m) => m.trim()).filter(Boolean)
+  : []);
+export const aiEnabled = () => !!process.env.GROQ_API_KEY || !!process.env.OPENROUTER_API_KEY;
+/** Free web search exists only on Groq (gpt-oss browser_search). */
+export const searchEnabled = () => !!process.env.GROQ_API_KEY;
+
+/** Who to ask, in order: Groq first, then OpenRouter's free models (not for web search). */
+export function candidates(search = false): Candidate[] {
+  return [
+    ...models().map((model) => ({ provider: "groq" as const, model })),
+    ...(search ? [] : openrouterModels().map((model) => ({ provider: "openrouter" as const, model }))),
+  ];
+}
+const label = (c: Candidate) => `${c.provider === "groq" ? "Groq" : "OpenRouter"} ${c.model}`;
 
 export class AiQuotaError extends Error {
-  constructor(public scope: "day" | "minute", public resetInSeconds: number) {
+  constructor(public scope: "day" | "minute", public resetInSeconds: number, who = "Groq") {
     const when = resetInSeconds >= 3600 ? `about ${Math.ceil(resetInSeconds / 3600)} h` : resetInSeconds >= 90 ? `about ${Math.ceil(resetInSeconds / 60)} min` : `${Math.max(1, Math.ceil(resetInSeconds))} s`;
-    super(`Groq's free limit is used up (${scope === "day" ? "daily" : "per-minute"} limit, HTTP 429). It resets in ${when}; until then, lookups carry on without AI.`);
+    super(`The free ${scope === "day" ? "daily" : "per-minute"} AI limit is used up on ${who} (HTTP 429). It resets in ${when}; until then, lookups carry on without AI and the rest waits for AI.`);
     this.name = "AiQuotaError";
   }
 }
@@ -51,13 +74,18 @@ export const latestLimits = () => Object.fromEntries(limits);
 
 const blockedUntil = new Map<string, { until: number; scope: "day" | "minute" }>();
 const cache = new Map<string, { at: number; value: unknown }>();
-const usage = { requests: 0, tokens: 0, cached: 0 };
+const usage = { requests: 0, tokens: 0, cached: 0, orRequests: 0 };
 let notice: AiQuotaError | null = null;
 
 /** Counters since the last call; routes emit them as an `ai` event. */
 export function takeUsage() {
-  const out = { ...usage, quota: notice ? { scope: notice.scope, resetInSeconds: notice.resetInSeconds, message: notice.message } : undefined, limits: latestLimits(), models: models() };
-  usage.requests = usage.tokens = usage.cached = 0;
+  const out = {
+    ...usage,
+    quota: notice ? { scope: notice.scope, resetInSeconds: notice.resetInSeconds, message: notice.message } : undefined,
+    limits: latestLimits(), models: models(),
+    openrouter: openrouterModels().length ? { models: openrouterModels(), requests: usage.orRequests } : undefined,
+  };
+  usage.requests = usage.tokens = usage.cached = usage.orRequests = 0;
   return out;
 }
 export const quotaNotice = () => notice;
@@ -73,7 +101,7 @@ export function __setTransport(f?: FetchFn, s?: (ms: number) => Promise<void>) {
   limits.clear();
   cache.clear();
   notice = null;
-  usage.requests = usage.tokens = usage.cached = 0;
+  usage.requests = usage.tokens = usage.cached = usage.orRequests = 0;
 }
 
 async function sha(text: string): Promise<string> {
@@ -105,39 +133,65 @@ type Failure = { ok: false; kind: "quota"; scope: "day" | "minute"; wait: number
 
 interface CallShape { json: boolean; search?: boolean }
 
-async function call(model: string, system: string, user: string, maxTokens: number, withReasoning: boolean, shape: CallShape = { json: true }): Promise<Attempt | Failure> {
-  const key = process.env.GROQ_API_KEY!;
+async function call(c: Candidate, system: string, user: string, maxTokens: number, withReasoning: boolean, shape: CallShape = { json: true }, jsonMode = true): Promise<Attempt | Failure> {
+  const { model } = c;
+  const groq = c.provider === "groq";
+  const key = (groq ? process.env.GROQ_API_KEY : process.env.OPENROUTER_API_KEY)!;
+  const name = groq ? "Groq" : "OpenRouter";
   const body: Record<string, unknown> = {
     model,
     temperature: 0,
-    max_completion_tokens: maxTokens,
     messages: [{ role: "system", content: system }, { role: "user", content: user }],
   };
+  body[groq ? "max_completion_tokens" : "max_tokens"] = maxTokens;
   // Groq's built-in browser search can't be combined with structured (JSON) output.
-  if (shape.json && !shape.search) body.response_format = { type: "json_object" };
+  if (shape.json && !shape.search && jsonMode) body.response_format = { type: "json_object" };
   if (shape.search) {
     body.tools = [{ type: "browser_search" }];
     body.tool_choice = "required";
   }
-  if (withReasoning) {
+  if (withReasoning && groq) {
     body.reasoning_effort = "low"; // reasoning tokens count against the free limits
     body.include_reasoning = false;
   }
   let res: Response;
   try {
-    res = await doFetch(ENDPOINT, {
+    res = await doFetch(groq ? GROQ_ENDPOINT() : `${OR_BASE()}/chat/completions`, {
       method: "POST",
-      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json", ...(groq ? {} : { "x-title": "Scrape Studio" }) },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(40_000),
+      signal: AbortSignal.timeout(45_000),
     });
   } catch (e) {
-    return { ok: false, kind: "error", message: `Could not reach Groq: ${scrub(e instanceof Error ? e.message : e, [key])}` };
+    return { ok: false, kind: "error", message: `Could not reach ${name}: ${scrub(e instanceof Error ? e.message : e, [key])}` };
   }
   usage.requests++;
+  if (!groq) {
+    usage.orRequests++;
+    if (res.status === 429) {
+      const text = await res.text().catch(() => "");
+      // OpenRouter: "free-models-per-day" (50 a day, or 1,000 once $10 of credits were bought) vs per-minute or a busy upstream.
+      const resetMs = num(res.headers.get("x-ratelimit-reset"));
+      const wait = resetMs && resetMs > Date.now() ? (resetMs - Date.now()) / 1000 : parseDuration(res.headers.get("retry-after")) ?? 60;
+      return { ok: false, kind: "quota", scope: /per[- ]day|daily/i.test(text) ? "day" : "minute", wait };
+    }
+    if (res.status === 400 && jsonMode && shape.json) {
+      const text = await res.text().catch(() => "");
+      if (/response_format|json/i.test(text)) return call(c, system, user, maxTokens, withReasoning, shape, false); // no JSON mode: the prompt asks for JSON
+      return { ok: false, kind: "error", message: `OpenRouter rejected the request (400): ${scrub(text.slice(0, 200), [key])}` };
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, kind: "error", message: `OpenRouter answered HTTP ${res.status}${res.status === 401 ? " (check OPENROUTER_API_KEY)" : ""}: ${scrub(text.slice(0, 200), [key])}` };
+    }
+    const data = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: { content?: string } }>; usage?: { total_tokens?: number }; error?: { message?: string } };
+    if (data.error) return { ok: false, kind: "error", message: `OpenRouter: ${scrub(String(data.error.message ?? "error").slice(0, 200), [key])}` };
+    return { ok: true, text: data.choices?.[0]?.message?.content ?? "", tokens: data.usage?.total_tokens ?? 0 };
+  }
   const before = limits.get(model);
   limits.set(model, {
-    ...(before?.dayTokensUsed != null && Date.now() - before.at < 6 * 3600_000 ? { dayTokensUsed: before.dayTokensUsed, dayTokensLimit: before.dayTokensLimit } : {}),
+    // A daily-usage figure only lasts until the model answers again (Groq frees its daily limit gradually).
+    ...(res.status === 429 && before?.dayTokensUsed != null ? { dayTokensUsed: before.dayTokensUsed, dayTokensLimit: before.dayTokensLimit } : {}),
     remainingRequests: num(res.headers.get("x-ratelimit-remaining-requests")),
     limitRequests: num(res.headers.get("x-ratelimit-limit-requests")),
     remainingTokens: num(res.headers.get("x-ratelimit-remaining-tokens")),
@@ -160,7 +214,7 @@ async function call(model: string, system: string, user: string, maxTokens: numb
   }
   if (res.status === 400 && withReasoning) {
     const text = await res.text().catch(() => "");
-    if (/reasoning|include_reasoning/i.test(text)) return call(model, system, user, maxTokens, false, shape);
+    if (/reasoning|include_reasoning/i.test(text)) return call(c, system, user, maxTokens, false, shape);
     return { ok: false, kind: "error", message: `Groq rejected the request (400): ${scrub(text.slice(0, 200), [key])}` };
   }
   if (!res.ok) {
@@ -190,8 +244,13 @@ function parseJson(text: string): unknown {
  * Throws AiQuotaError when every model is rate-limited, AiError for other failures.
  */
 export async function groqJson<T = unknown>(kind: string, system: string, user: string, opts: GroqOptions<T> = {}): Promise<T> {
-  return (await run(kind, system, user, opts, { json: true })).value as T;
+  const r = await run(kind, system, user, opts, { json: true });
+  lastAnswer = r.model;
+  return r.value as T;
 }
+let lastAnswer = "";
+/** Which provider and model gave the last JSON answer ("Groq openai/gpt-oss-20b", "OpenRouter …", "cache"). */
+export const lastAnsweredBy = () => lastAnswer;
 
 /**
  * Ask a question Groq answers after searching the web itself (built-in browser_search,
@@ -204,7 +263,8 @@ export async function groqSearch(kind: string, system: string, user: string, max
 }
 
 async function run<T>(kind: string, system: string, user: string, opts: GroqOptions<T>, shape: CallShape): Promise<{ value: unknown; model: string; tokens: number }> {
-  if (!aiEnabled()) throw new AiError("AI is off: GROQ_API_KEY is not set.");
+  if (!aiEnabled()) throw new AiError("AI is off: neither GROQ_API_KEY nor OPENROUTER_API_KEY is set.");
+  if (shape.search && !searchEnabled()) throw new AiError("AI web search needs GROQ_API_KEY (OpenRouter's web search is not free).");
   const maxTokens = opts.maxTokens ?? 2500;
   const ck = await sha(`${kind}\n${shape.search ? "search" : "json"}\n${system}\n${user}`);
   const hit = cache.get(ck);
@@ -215,14 +275,16 @@ async function run<T>(kind: string, system: string, user: string, opts: GroqOpti
 
   let quota: AiQuotaError | null = null;
   let lastError = "";
-  for (const model of models()) {
+  for (const cand of candidates(shape.search)) {
+    const model = `${cand.provider}:${cand.model}`;
     const blocked = blockedUntil.get(model);
     if (blocked && blocked.until > Date.now()) {
-      quota = new AiQuotaError(blocked.scope, (blocked.until - Date.now()) / 1000);
+      const left = (blocked.until - Date.now()) / 1000;
+      if (!quota || left < quota.resetInSeconds || (quota.scope === "day" && blocked.scope === "minute")) quota = new AiQuotaError(blocked.scope, left);
       continue;
     }
     for (let attempt = 0; attempt < 2; attempt++) {
-      const r = await call(model, system, user, maxTokens, true, shape);
+      const r = await call(cand, system, user, maxTokens, true, shape);
       if (r.ok) {
         try {
           const value = shape.json ? parseJson(r.text) : r.text.trim();
@@ -231,9 +293,9 @@ async function run<T>(kind: string, system: string, user: string, opts: GroqOpti
           cache.set(ck, { at: Date.now(), value });
           if (cache.size > 200) cache.delete(cache.keys().next().value as string);
           notice = null;
-          return { value, model, tokens: r.tokens };
+          return { value, model: `${label(cand)}`, tokens: r.tokens };
         } catch {
-          lastError = `${model} returned output that was not usable`;
+          lastError = `${label(cand)} returned output that was not usable`;
           break; // next model
         }
       }
@@ -243,7 +305,8 @@ async function run<T>(kind: string, system: string, user: string, opts: GroqOpti
           continue; // same model, once
         }
         blockedUntil.set(model, { until: Date.now() + r.wait * 1000, scope: r.scope });
-        quota = new AiQuotaError(r.scope, r.wait);
+        // Keep the soonest reset: AI is back as soon as any one model is.
+        if (!quota || r.wait < quota.resetInSeconds || (quota.scope === "day" && r.scope === "minute")) quota = new AiQuotaError(r.scope, r.wait);
         break; // next model
       }
       lastError = r.message;
@@ -251,10 +314,14 @@ async function run<T>(kind: string, system: string, user: string, opts: GroqOpti
     }
   }
   if (quota) {
+    // Name the providers that are actually used up (web search only ever uses Groq).
+    const tried = candidates(shape.search).map((c) => c.provider);
+    const who = tried.includes("groq") && tried.includes("openrouter") ? "Groq and OpenRouter" : tried.includes("openrouter") ? "OpenRouter" : "Groq";
+    quota = new AiQuotaError(quota.scope, quota.resetInSeconds, who);
     notice = quota;
     throw quota;
   }
-  throw new AiError(lastError || "Groq did not return a usable answer.");
+  throw new AiError(lastError || "The AI did not return a usable answer.");
 }
 
 export async function selfCheckAsync(): Promise<string> {
@@ -322,8 +389,47 @@ export async function selfCheckAsync(): Promise<string> {
   eq(seen[0], JSON.stringify({ tools: [{ type: "browser_search" }], json: false, effort: "low" }), "search request shape");
   eq(latestLimits()["openai/gpt-oss-20b"]?.remainingTokens, 4900, "rate-limit headers recorded");
 
+  // OpenRouter after Groq: both Groq models at their daily limit -> an OpenRouter free model answers
+  process.env.OPENROUTER_API_KEY = "sk-or-v1-testtesttesttest";
+  const hosts: string[] = [];
+  const fake2: FetchFn = async (u, init) => {
+    hosts.push(`${new URL(String(u)).hostname}|${JSON.parse(String(init?.body)).model}`);
+    return queue.shift()!();
+  };
+  __setTransport(fake2, noSleep);
+  queue = [() => limited("tokens per day (TPD)", "7200"), () => limited("tokens per day (TPD)", "7200"), () => ok({ or: 1 })];
+  eq(JSON.stringify(await groqJson("t", "s", "u5")), '{"or":1}', "OpenRouter answers when Groq is used up");
+  eq(hosts.join(","), "api.groq.com|openai/gpt-oss-20b,api.groq.com|openai/gpt-oss-120b,openrouter.ai|google/gemma-4-31b-it:free", "provider order");
+  // web search never goes to OpenRouter (it is paid there)
+  __setTransport(fake2, noSleep);
+  hosts.length = 0;
+  queue = [() => limited("tokens per day (TPD)", "7200"), () => limited("tokens per day (TPD)", "7200")];
+  let sErr: unknown;
+  try {
+    await groqSearch("s", "find", "Acme");
+  } catch (e) {
+    sErr = e;
+  }
+  eq(sErr instanceof AiQuotaError && hosts.every((h) => h.startsWith("api.groq.com")), true, "search stays on Groq");
+  // everything at its daily limit -> visible quota error with the soonest reset; key never in the message
+  __setTransport(fake2, noSleep);
+  queue = [
+    () => limited("tokens per day (TPD)", "7200"), () => limited("tokens per day (TPD)", "7200"),
+    () => new Response(JSON.stringify({ error: { message: "Rate limit exceeded: free-models-per-day" } }), { status: 429, headers: { "x-ratelimit-reset": String(Date.now() + 3_600_000) } }),
+    () => new Response(JSON.stringify({ error: { message: "Rate limit exceeded: free-models-per-day" } }), { status: 429, headers: { "x-ratelimit-reset": String(Date.now() + 3_600_000) } }),
+  ];
+  let all: unknown;
+  try {
+    await groqJson("t", "s", "u6");
+  } catch (e) {
+    all = e;
+  }
+  eq(all instanceof AiQuotaError && (all as AiQuotaError).scope === "day" && (all as AiQuotaError).resetInSeconds <= 3601, true, "all providers used up -> soonest reset");
+  eq(/sk-or-v1/.test(String((all as Error).message)), false, "OpenRouter key never in a message");
+  delete process.env.OPENROUTER_API_KEY;
+
   eq(parseDuration("2m59.56s"), 179.56, "duration");
   __setTransport();
   delete process.env.GROQ_API_KEY;
-  return "groq ok (fallback, retry, quota, bad json, cache, search, limits)";
+  return "groq ok (fallback, retry, quota, bad json, cache, search, limits, openrouter)";
 }

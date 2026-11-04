@@ -87,7 +87,11 @@ export function LeadsPanel(props: {
             <div className="aihead">
               <Bot size={15} aria-hidden="true" />
               {props.aiError ? <span>AI status unknown: {props.aiError}</span> : !ai ? <span>Checking AI…</span> : ai.enabled ? (
-                <span>AI on: Groq <code>{ai.models?.[0]}</code>{ai.models?.[1] ? <> (falls back to <code>{ai.models[1]}</code>)</> : null}</span>
+                <span>
+                  AI on: {ai.models?.length ? <>Groq <code>{ai.models[0]}</code>{ai.models[1] ? <>, then <code>{ai.models[1]}</code></> : null}</> : null}
+                  {ai.openrouter?.models.length ? <>{ai.models?.length ? ", then " : ""}OpenRouter free <code>{ai.openrouter.models.join(", ")}</code></> : null}
+                  {ai.search === false ? " (web search needs a Groq key)" : ""}
+                </span>
               ) : (
                 <span>AI off: <code>GROQ_API_KEY</code> isn&rsquo;t set on the server. Lookups still run, without AI.</span>
               )}

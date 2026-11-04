@@ -11,6 +11,10 @@
 4. **Groq, only for hard cases** – role found but no isolable name. About 700 characters per company, 10 companies per request.
 5. **Guards** – a name, email or LinkedIn URL is kept only if it appears verbatim in a fetched page; a role must be near the name; generic mailboxes (info@, office@) are labelled company contact, not a person. Each value carries source URL + confidence (high / medium / low).
 
+## AI providers and the AI queue
+- Order: Groq `openai/gpt-oss-20b` → Groq `openai/gpt-oss-120b` → OpenRouter free models (`OPENROUTER_API_KEY`, default `google/gemma-4-31b-it:free`, `openrouter/free`). OpenRouter covers reading requests and names only: its web search is paid even on free models, so AI website search stays on Groq.
+- Every company is looked up at once without waiting for AI. Companies that still need AI (website search, name reading) are marked `needsAi` and queued in the job's `ai` stage, which runs whenever the free limits allow: on a daily 429 it saves the reset time, waits, and continues by itself while any tab of the app is open (or when it is next opened), across days, until the queue is empty. The file can be downloaded at any time.
+
 ## Free-tier budget
 ~200K tokens/day per model, 30 requests/min. Target: ≤ 20 requests and ≤ 70K tokens for 300 companies. Per-minute 429: wait ≤ 20 s and retry once; daily 429: switch model; both exhausted: show the error and continue without AI.
 

@@ -1,14 +1,39 @@
 import { denied, hasAccess } from "@/lib/access";
-import { AiQuotaError, aiEnabled, groqJson, latestLimits, models, takeUsage } from "@/lib/groq";
+import { AiQuotaError, aiEnabled, groqJson, latestLimits, models, openrouterModels, searchEnabled, takeUsage } from "@/lib/groq";
 import { safeMessage } from "@/lib/redact";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-/** GET: is AI configured (no Groq request). Never returns the key. */
+/**
+ * OpenRouter's own count of today's free-model requests (GET /api/v1/key: usage info only,
+ * no AI request is made and nothing is spent). Shape read defensively.
+ */
+async function openrouterDaily(): Promise<{ used?: number; limit?: number } | undefined> {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) return undefined;
+  try {
+    const base = (process.env.NODE_ENV !== "production" && !process.env.VERCEL && process.env.OPENROUTER_BASE_URL) || "https://openrouter.ai/api/v1";
+    const res = await fetch(`${base}/key`, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return undefined;
+    const data = ((await res.json()) as { data?: Record<string, unknown> }).data ?? {};
+    const f = data.free_model_daily_requests as Record<string, unknown> | number | undefined;
+    const pick = (o: Record<string, unknown>, ...k: string[]) => k.map((x) => o[x]).find((v) => typeof v === "number") as number | undefined;
+    if (f && typeof f === "object") return { used: pick(f, "used", "count", "usage", "requests"), limit: pick(f, "limit", "max", "ceiling") };
+    if (typeof f === "number") return { used: f };
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** GET: which AI is configured (no AI request is made). Never returns a key. */
 export async function GET(req: Request) {
   if (!hasAccess(req)) return denied();
-  return Response.json({ enabled: aiEnabled(), models: models(), limits: latestLimits() }, { headers: { "cache-control": "no-store" } });
+  return Response.json({
+    enabled: aiEnabled(), search: searchEnabled(), models: models(), limits: latestLimits(),
+    openrouter: openrouterModels().length ? { models: openrouterModels(), daily: await openrouterDaily() } : undefined,
+  }, { headers: { "cache-control": "no-store" } });
 }
 
 /** POST: one tiny Groq request to prove the key and model work, and read the current free-tier limits. */
