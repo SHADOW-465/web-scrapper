@@ -49,7 +49,7 @@ const STOP = new Set(("für fur mit bei auf aus nach über uber unter vom zum zu
   "editions edition éditions verlagsgruppe imprint imprints distribution vertrieb rights lizenzen licensing foreign sales marketing presse press " +
   "mentions légales legales société societe siège siege capital social rcs siret tva hébergeur hebergeur hébergement hebergement responsable publication rédaction " +
   "sede legale società societa partita iva capitale sociale redazione contatti razón razon domicilio cif nif aviso legal sociedad editorial " +
-  "colofon uitgeverij spółka spolka wydawnictwo kontakt").split(" "));
+  "colofon uitgeverij spółka spolka wydawnictwo kontakt site web website internet page pages du des sur über of by").split(" "));
 
 const NAME_TOKEN = /^(?:[A-ZÄÖÜÉÈÁÀÅØŁŚŻŹĆŃ][\p{L}'’.-]{1,}|van|von|de|der|den|la|le|di|da|zu|zur|bin|al|el)$/u;
 const TITLE = /^(?:dr\.?|prof\.?|mag\.?|dipl\.?(?:-\w+\.?)?|ing\.?|mr\.?|mrs\.?|ms\.?|herr|frau)$/i;
@@ -59,13 +59,16 @@ export const normalise = (s: string) => norm(s).toLowerCase().normalize("NFKD").
 
 /** Could this string be a person's name? Returns it cleaned, or null. */
 export function asName(s: string): string | null {
-  const t = norm(s).replace(/^[,;:–—-]+|[,;:–—-]+$/g, "").trim();
+  // "By Anna Meier", "von Anna Meier": the byline word is not part of the name.
+  const t = norm(s).replace(/^[,;:–—-]+|[,;:–—-]+$/g, "").trim().replace(/^(by|von|par|por|da|door|written by|posted by)\s+(?=\p{Lu})/iu, "");
   if (!t || t.length > 60 || /[0-9@/\\|<>(){}[\]]/.test(t)) return null;
   const tokens = t.split(" ").filter((w) => !TITLE.test(w));
   if (tokens.length < 2 || tokens.length > 4) return null;
   if (!tokens.every((w) => NAME_TOKEN.test(w))) return null;
   if (tokens.some((w) => NOT_NAME.test(w) || STOP.has(w.toLowerCase().replace(/[.,]$/, "")))) return null;
   if (!/^[A-ZÄÖÜÉÈÁÀÅØŁŚŻŹĆŃ]/u.test(tokens[0])) return null;
+  // "Les Argonautes", "The Bookshop", "Die Andere Bibliothek": an article first means a company or title, not a person.
+  if (/^(les|le|la|l'|the|die|der|das|il|lo|gli|el|los|las|een|het|de|du|des|a|an)$/i.test(tokens[0])) return null;
   if (roleOf(t) || /gesellschaft|gesch[aä]ftsf[uü]hrend|mehrheit|prokur|vertret|beauftragt|verantwortlich|redaktion/i.test(t)) return null; // a title, not a name
   // All-caps words are only names when short ("ANNA MEIER" is rare; "HAFTUNGSAUSSCHLUSS" is common).
   if (tokens.every((w) => w === w.toUpperCase()) && tokens.some((w) => w.length > 10)) return null;
@@ -362,6 +365,9 @@ export function selfCheck(): string {
   eq(extractFacts("<div>Anna Meier</div><div>Author / IP Owner</div>", "https://x.de").people, [], "IP owner is not a decision-maker");
 
   eq(extractFacts("<p>Dyrektor handlowy: Jan Nowak</p><p>handlowy@firma.pl</p>", "https://firma.pl").people[0]?.email, undefined, "Polish sales mailbox is not the person's email");
+  eq(asName("By Marleen Seegers"), "Marleen Seegers", "byline word dropped");
+  eq(asName("DU SITE"), null, "French legal heading is not a name");
+  eq(asName("Les Argonautes"), null, "article first: a company, not a person");
   eq(cleanLinkedin("https://www.linkedin.com/school/7328964/admin/dashboard"), "https://www.linkedin.com/school/7328964", "linkedin admin url trimmed");
   eq(cleanLinkedin("https://pl.linkedin.com/company/abedik?trk=x"), "https://www.linkedin.com/company/abedik", "country subdomain + query");
   const fr = extractFacts("<html><body><h1>Mentions légales</h1><p>Directeur de la publication : Claire Dubois</p><p>Gérant : Marc Lefèvre</p></body></html>", "https://x.fr/mentions-legales");
@@ -375,5 +381,5 @@ export function selfCheck(): string {
   eq(guardAiPerson({ name: "Maria Lopez", role: "Managing Director", email: "m.lopez@acme.com" }, text, "u")?.email, undefined, "ai email not on page dropped");
   eq(guardAiPerson({ name: "John Smith", role: "CEO" }, text, "u"), null, "ai name not on page dropped");
   eq(guardAiPerson({ name: "Bob Fake", role: "CEO" }, text + " " + "x".repeat(400) + " CEO", "u"), null, "ai role too far dropped");
-  return "people ok (24 checks)";
+  return "people ok (27 checks)";
 }

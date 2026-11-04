@@ -6,7 +6,7 @@
 
 ## Pipeline (per company)
 1. **Listing** – scan the marketplace, follow pagination (existing scan/replay/crawl), read exhibitor detail pages.
-2. **Website** – use the website link on the exhibitor page. Only if missing, run one public web search for the official domain (budgeted).
+2. **Website** – the website listed on the exhibitor page; else a verified domain match (country-specific endings); else Groq `browser_search` (budgeted per run). Public search engines answer bots with a challenge, so they are not scraped.
 3. **People, deterministic first** – fetch imprint/team/contact/about pages (max 3 per company), read JSON-LD, `mailto:`/`tel:`, German imprint lines ("Geschäftsführer: …"), team cards, LinkedIn links present on the page.
 4. **Groq, only for hard cases** – role found but no isolable name. About 700 characters per company, 10 companies per request.
 5. **Guards** – a name, email or LinkedIn URL is kept only if it appears verbatim in a fetched page; a role must be near the name; generic mailboxes (info@, office@) are labelled company contact, not a person. Each value carries source URL + confidence (high / medium / low).
@@ -24,11 +24,14 @@ Every long step is batched (≤ 40 s per call) and streamed as NDJSON by a clien
 
 ## Milestones (commit each; `tsc` and `build` green; branch `cloud/scraper-build`; never `main`; never deploy)
 - **M0 ✅** Groq layer (`lib/groq.ts`), redaction (`lib/redact.ts`), signed-in jobs never written to IndexedDB.
-- **M1** Probe Buchmesse + pagination, real row count. *(needs network access to event.buchmesse.de)*
+- **M1 ✅** Buchmesse: feed `POST /api/v1/search/exhibitors`, 4,207 exhibitors, 36 per page; full export of all 4,207 rows verified.
+- **B ✅** Decision-maker lookup: `lib/roles.ts`, `lib/people.ts`, `lib/company.ts`, `lib/leads.ts`, `/api/people`, `/api/ai-status`, job stage `people`, Decision-makers panel in the UI with a 5-company trial. Measured on the 36 exhibitors of page 1 without AI: 28 websites, 9 named decision-makers, 13 company emails, 9 company LinkedIn pages.
 - **A** `lib/wishes.ts`, input box, exact columns, per-field source/confidence.
-- **B** `lib/roles.ts`, `lib/people.ts`, website discovery, `/api/people`, job stage `people`.
 - **C** `lib/login.ts`, `lib/session.ts`, sign-in dialog.
 - **Final** Generic check on two other marketplaces; summary.
+
+## Local testing
+`SS_DEV_PROXY=1 NODE_USE_ENV_PROXY=1 CHROME_PATH=… npx next dev` behind an egress proxy without local DNS (never active in production). `GROQ_BASE_URL` (non-production only) points the AI at a fake Groq for tests.
 
 ## Known constraints
 Live tests need outbound access to event.buchmesse.de, api.groq.com and company sites, and a `GROQ_API_KEY`. Without them only mocked tests run, and the summary will say so.
