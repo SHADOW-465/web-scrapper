@@ -11,9 +11,12 @@ import * as itemsClient from "../lib/items-client";
 import * as snapshot from "../lib/snapshot";
 import * as redact from "../lib/redact";
 import * as groq from "../lib/groq";
+import * as roles from "../lib/roles";
+import * as people from "../lib/people";
+import * as company from "../lib/company";
 
 let failed = 0;
-for (const [name, mod] of Object.entries({ records, ssrf, token, replay, correlate, exporters, model, items, itemsClient, snapshot, redact })) {
+for (const [name, mod] of Object.entries({ records, ssrf, token, replay, correlate, exporters, model, items, itemsClient, snapshot, redact, roles, people })) {
   try {
     console.log("pass ", (mod as { selfCheck: () => string }).selfCheck());
   } catch (e) {
@@ -23,6 +26,7 @@ for (const [name, mod] of Object.entries({ records, ssrf, token, replay, correla
 }
 try {
   console.log("pass ", await groq.selfCheckAsync());
+  console.log("pass ", await company.selfCheck());
 } catch (e) {
   failed++;
   console.log("FAIL  groq", (e as Error).message);
