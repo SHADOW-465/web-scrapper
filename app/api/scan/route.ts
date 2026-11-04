@@ -1,5 +1,6 @@
 import { denied, hasAccess } from "@/lib/access";
 import { ndjson } from "@/lib/ndjson";
+import { safeMessage } from "@/lib/redact";
 import { scan, SiteReadError } from "@/lib/scan";
 import { assertPublicUrl, BlockedUrlError } from "@/lib/ssrf";
 
@@ -26,14 +27,14 @@ export async function POST(req: Request) {
         // The pasted cookie is never echoed: it only survives inside sealed feed tokens.
         emit({ type: "result", ...result });
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = safeMessage(err, [cookie]);
         const kind = err instanceof SiteReadError ? "site" : "server";
         console.error("[scan] request failed", { kind, message });
         emit({ type: "error", message, kind });
       }
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = safeMessage(err);
     return Response.json({ error: "scan_error", message }, { status: 500 });
   }
 }

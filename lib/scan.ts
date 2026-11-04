@@ -12,7 +12,7 @@
  */
 import type { Browser, HTTPResponse } from "puppeteer-core";
 import { parseHTML } from "linkedom";
-import { aiEnabled, extractRecords, nameFields } from "./ai";
+import { aiEnabled, extractRecords, nameFields, quotaNotice } from "./ai";
 import { extractorJs, launch, nudge, openPage } from "./browser";
 import { detectPagination, findRecordSets, findTotal, flatten, humanizeKey, isPlumbing, type Flat } from "./records";
 import type { Replay } from "./replay";
@@ -346,6 +346,8 @@ export async function scan(
         ? "No list or data was found on this page. Click the things you want on the page to capture them."
         : "No list or data was found on this page. Click the things you want on the page to capture them, or add a Groq key to let AI read the page.");
     }
+    const quota = quotaNotice();
+    if (quota) notes.push(quota.message); // a 429 is shown to the user, never hidden
     return { url, finalUrl, title, snapshot: snap.html, snapshotBytes: snap.bytes, apis, notes };
   } finally {
     await browser?.close().catch(() => undefined);

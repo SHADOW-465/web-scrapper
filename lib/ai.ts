@@ -1,81 +1,23 @@
 /**
- * Optional AI help via Groq's free tier (OpenAI-compatible API).
+ * Optional AI help via Groq's free tier (see lib/groq.ts for models and limits).
  *
- * Used for two small jobs, never for bulk extraction (the free tier's rate
- * limits could not carry thousands of pages, and deterministic selectors are
- * faster and exact):
- *   1. naming fields the way a person would, and flagging junk fields;
- *   2. reading records out of a page that has no list or data feed at all.
- *
- * Without GROQ_API_KEY, or on any error or rate limit, every function returns
- * null and the app falls back to its built-in rules.
+ * Used for small jobs only, never for bulk extraction: naming fields, and
+ * reading records from a page with no list. Without GROQ_API_KEY every
+ * function returns null and the app falls back to its built-in rules.
+ * A rate limit (429) is not hidden: it is recorded and shown via quotaNotice().
  */
+import { aiEnabled, groqJson as groq, quotaNotice, AiQuotaError } from "./groq";
 
-const ENDPOINT = "https://api.groq.com/openai/v1";
-const PREFERRED = ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"];
+export { aiEnabled, quotaNotice };
 
-export const aiEnabled = () => !!process.env.GROQ_API_KEY;
-
-let workingModel: string | null = null;
-
-async function listModels(key: string): Promise<string[]> {
-  try {
-    const res = await fetch(`${ENDPOINT}/models`, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { data?: Array<{ id: string; active?: boolean }> };
-    return (data.data ?? [])
-      .filter((m) => m.active !== false && !/whisper|guard|tts|playai|vision|compound|embed/i.test(m.id))
-      .map((m) => m.id);
-  } catch {
-    return [];
-  }
-}
-
-/** Ask for a JSON object. Returns null on any failure. */
+/** Ask for a JSON object. Null on failure; a 429 is recorded in quotaNotice() for the UI. */
 export async function groqJson<T>(system: string, user: string, maxTokens = 2500): Promise<T | null> {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) return null;
-  const candidates = [process.env.GROQ_MODEL, workingModel, ...PREFERRED].filter((m, i, a): m is string => !!m && a.indexOf(m) === i);
-
-  for (let attempt = 0; attempt < candidates.length + 1; attempt++) {
-    let model = candidates[attempt];
-    if (!model) {
-      // Every preferred name was retired: ask Groq what it serves today.
-      const live = await listModels(key);
-      model = live.find((m) => /llama|gpt-oss|qwen|mixtral/i.test(m)) ?? live[0];
-      if (!model) return null;
-    }
-    try {
-      const res = await fetch(`${ENDPOINT}/chat/completions`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          model,
-          temperature: 0,
-          max_tokens: maxTokens,
-          response_format: { type: "json_object" },
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: user },
-          ],
-        }),
-        signal: AbortSignal.timeout(25_000),
-      });
-      if (res.status === 404 || res.status === 400) {
-        const err = await res.text();
-        if (/model/i.test(err) && /(not.?found|decommission|does not exist|not supported)/i.test(err)) continue;
-        return null;
-      }
-      if (!res.ok) return null; // 429 rate limit, 5xx: fall back quietly
-      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      const text = data.choices?.[0]?.message?.content ?? "";
-      workingModel = model;
-      return JSON.parse(text) as T;
-    } catch {
-      return null;
-    }
+  try {
+    return await groq<T>("legacy", system, user, { maxTokens });
+  } catch (e) {
+    if (e instanceof AiQuotaError) return null; // surfaced through quotaNotice()
+    return null;
   }
-  return null;
 }
 
 export interface FieldForNaming { key: string; current: string; samples: string[] }

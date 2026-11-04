@@ -23,6 +23,8 @@ export interface JobInput {
   list?: PageList;
   feed?: Feed;
   crawl?: CrawlRequest;
+  /** Signed in with a cookie or session: never written to disk. */
+  gated?: boolean;
 }
 
 export interface Job extends JobInput {
@@ -118,13 +120,18 @@ async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBReq
   });
 }
 
-export const saveJob = (job: Job) => tx("readwrite", (s) => s.put({ ...job, updatedAt: Date.now() }));
+/**
+ * Signed-in jobs are never persisted: their feed token seals session cookies,
+ * and nothing about a login may reach IndexedDB. They live in memory only
+ * (so they cannot be resumed after the tab closes).
+ */
+export const saveJob = (job: Job) => (job.gated ? Promise.resolve(null) : tx("readwrite", (s) => s.put({ ...job, updatedAt: Date.now() })));
 export const deleteJob = (id: string) => tx("readwrite", (s) => s.delete(id));
 export async function loadJobs(): Promise<Job[]> {
   const all = ((await tx("readonly", (s) => s.getAll())) as Job[] | null) ?? [];
   const week = Date.now() - 7 * 24 * 3600 * 1000;
   for (const j of all) if (j.updatedAt < week) void deleteJob(j.id);
-  return all.filter((j) => j.updatedAt >= week).sort((a, b) => b.updatedAt - a.updatedAt);
+  return all.filter((j) => !j.gated && j.updatedAt >= week).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /* ------------------------------------------------------------ running */

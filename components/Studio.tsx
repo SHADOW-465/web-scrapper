@@ -444,7 +444,7 @@ export default function Studio() {
         },
       };
     }
-    await execute(newJob({ title, format, scanUrl: scan.finalUrl, scope, ws, list: activeList, feed, crawl }));
+    await execute(newJob({ title, format, scanUrl: scan.finalUrl, scope, ws, list: activeList, feed, crawl, gated: !!cookie.trim() }));
   }
 
   function saveCurrent(name: string) {
