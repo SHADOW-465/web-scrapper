@@ -9,7 +9,7 @@
  *  - no address is ever constructed from a name.
  */
 import { parseHTML } from "linkedom";
-import { roleOf, type Role } from "./roles";
+import { isExcludedTitle, roleOf, type Role } from "./roles";
 
 export type Confidence = "high" | "medium" | "low";
 
@@ -21,6 +21,8 @@ export interface Person {
   phone?: string;
   linkedin?: string;
   sourceUrl: string;
+  /** Where it was found: the fair's exhibitor page, the company's own website, or AI reading of a fetched page. */
+  sourceKind?: "exhibitor-page" | "company-site" | "ai";
   evidence: string;
   confidence: Confidence;
 }
@@ -35,8 +37,20 @@ export interface PageFacts {
   text: string;
 }
 
-export const GENERIC_MAIL = /^(info|kontakt|contact|office|mail|sales|hello|hallo|service|support|verlag|team|post|redaktion|presse|press|vertrieb|buchhaltung|rechnung|bestellung|order|orders|admin|webmaster|datenschutz|privacy|jobs|karriere)$/i;
+export const GENERIC_MAIL = /^(info|infos?|kontakt|contact|contacts|office|mail|email|sales|hello|hallo|hi|service|support|verlag|team|post|redaktion|presse|press|vertrieb|buchhaltung|rechnung|bestellung|order|orders|admin|webmaster|datenschutz|privacy|jobs|karriere|career|careers|marketing|rights|foreignrights|licensing|lizenzen|editorial|submissions|manuscripts|manuskripte|lektorat|accounts|billing|invoice|newsletter|shop|store|events|accueil|commercial|commandes|direction|redaction|rédaction|secretariat|editions|librairie|ventas|pedidos|administracion|comercial|vendite|amministrazione|segreteria|ordini|redazione|commerciale|biuro|sekretariat|handlowy|zamowienia|wydawnictwo|redakcja|verkoop|bestellingen|uitgeverij|noreply|no-reply)$/i;
 const NOT_NAME = /\b(gmbh|ag|kg|ug|ltd|llc|inc|verlag|verlage|publishing|publishers?|press|books?|media|group|holding|limited|company|co\.|s\.r\.o|b\.v|sp\.|z o\.o|team|contact|kontakt|impressum|imprint|telefon|phone|email|e-mail|str\.|straße|strasse|platz|weg|germany|deutschland|handelsregister|amtsgericht|ust|vat|haftung|rights|sales|marketing|director|manager|managing|chief|officer|head|editor|owner|founder|inhaber|gesch[aä]ftsf[uü]hrer\w*|vorstand|leiter\w*|leitung|einkauf\w*|ceo|cfo|cto|coo|publisher|verleger\w*|vertretungsberechtigt\w*|vertreten|durch|und|and|der|die|das|von|the|of|for|ist|is|zu|im|in|am|an|bei|mit|alle|all)\b/i;
+// Page-chrome and common words that pass the capitalisation test but are never part of a person's name.
+const STOP = new Set(("für fur mit bei auf aus nach über uber unter vom zum zur sie wir ihr unser unsere our your their this these with from into about " +
+  "calendar kalender event events veranstaltung veranstaltungen faq visitors besucher exhibitors exhibitor aussteller newsletter login logout anmelden registrieren " +
+  "cookie cookies menu menü home startseite shop warenkorb cart settings einstellungen privacy datenschutz terms agb news blog search suche universe award awards " +
+  "stand halle hall booth tickets ticket program programme programm messe fair buchmesse frankfurter frankfurt leipziger london bologna book fair kontaktformular " +
+  "service services products produkte product produkt catalogue katalog download downloads more mehr read lesen view zeigen open öffnen close schließen back zurück " +
+  "next weiter previous zurück online digital international national global europe european deutsche german english français team members mitglieder partner partners " +
+  "editions edition éditions verlagsgruppe imprint imprints distribution vertrieb rights lizenzen licensing foreign sales marketing presse press " +
+  "mentions légales legales société societe siège siege capital social rcs siret tva hébergeur hebergeur hébergement hebergement responsable publication rédaction " +
+  "sede legale società societa partita iva capitale sociale redazione contatti razón razon domicilio cif nif aviso legal sociedad editorial " +
+  "colofon uitgeverij spółka spolka wydawnictwo kontakt").split(" "));
+
 const NAME_TOKEN = /^(?:[A-ZÄÖÜÉÈÁÀÅØŁŚŻŹĆŃ][\p{L}'’.-]{1,}|van|von|de|der|den|la|le|di|da|zu|zur|bin|al|el)$/u;
 const TITLE = /^(?:dr\.?|prof\.?|mag\.?|dipl\.?(?:-\w+\.?)?|ing\.?|mr\.?|mrs\.?|ms\.?|herr|frau)$/i;
 
@@ -50,15 +64,35 @@ export function asName(s: string): string | null {
   const tokens = t.split(" ").filter((w) => !TITLE.test(w));
   if (tokens.length < 2 || tokens.length > 4) return null;
   if (!tokens.every((w) => NAME_TOKEN.test(w))) return null;
-  if (tokens.some((w) => NOT_NAME.test(w))) return null;
+  if (tokens.some((w) => NOT_NAME.test(w) || STOP.has(w.toLowerCase().replace(/[.,]$/, "")))) return null;
   if (!/^[A-ZÄÖÜÉÈÁÀÅØŁŚŻŹĆŃ]/u.test(tokens[0])) return null;
+  if (roleOf(t) || /gesellschaft|gesch[aä]ftsf[uü]hrend|mehrheit|prokur|vertret|beauftragt|verantwortlich|redaktion/i.test(t)) return null; // a title, not a name
+  // All-caps words are only names when short ("ANNA MEIER" is rare; "HAFTUNGSAUSSCHLUSS" is common).
+  if (tokens.every((w) => w === w.toUpperCase()) && tokens.some((w) => w.length > 10)) return null;
   return t;
 }
 
 /** Text of a page with one line per visible block. Scripts and styles removed. */
-export function pageLines(html: string): string[] {
-  const { document } = parseHTML(html);
+/** linkedom needs a root element; a fragment or an empty body would leave documentElement null. */
+export const asDocumentHtml = (html: string) => (/<html[\s>]/i.test(html) ? html : `<!doctype html><html><head></head><body>${html}</body></html>`);
+
+const CHROME = "nav,header,footer,aside,[role=navigation],[role=banner],[role=contentinfo],[aria-label*=cookie i],[id*=cookie i],[class*=cookie i],[class*=navbar i],[class*=breadcrumb i],[id*=menu i],[class*=menu i],[id*=footer i],[class*=footer i]";
+
+/**
+ * Text of a page with one line per visible block. Scripts and styles removed.
+ * With `contentOnly`, navigation, headers, footers and cookie banners are dropped too.
+ */
+export function pageLines(html: string, contentOnly = false): string[] {
+  const { document } = parseHTML(asDocumentHtml(html));
+  if (!document.documentElement) return [];
   document.querySelectorAll("script,style,noscript,template,svg,head").forEach((n) => n.remove());
+  if (contentOnly) {
+    try {
+      document.querySelectorAll(CHROME).forEach((n) => n.remove());
+    } catch {
+      /* selector not supported: keep everything */
+    }
+  }
   document.querySelectorAll("p,div,li,ul,ol,tr,td,th,h1,h2,h3,h4,h5,h6,section,article,br,dt,dd,address,header,footer,main,aside,nav,blockquote,figcaption").forEach((n) => n.append("\n"));
   const text = (document.body?.textContent || document.documentElement?.textContent || "").replace(/[\u00a0\t ]+/g, " ");
   return text.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -68,7 +102,14 @@ const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{
 const PHONE_RE = /(?:\+|00)\d[\d\s()./-]{7,17}\d|\(?0\d{2,5}\)?[\s/.-]?\d[\d\s/.-]{5,12}\d/g;
 
 const emailsIn = (s: string) => [...s.matchAll(EMAIL_RE)].map((m) => m[0].replace(/\.$/, ""));
-const phonesIn = (s: string) => [...s.matchAll(PHONE_RE)].map((m) => norm(m[0])).filter((p) => p.replace(/\D/g, "").length >= 8 && p.replace(/\D/g, "").length <= 15);
+/** Drop a bracket left over from "(+49) …" so a number reads cleanly. */
+const tidyPhone = (p: string) => {
+  let t = norm(p);
+  if ((t.match(/\)/g)?.length ?? 0) > (t.match(/\(/g)?.length ?? 0)) t = t.replace(/^([+\d]+)\)/, "$1");
+  if ((t.match(/\(/g)?.length ?? 0) > (t.match(/\)/g)?.length ?? 0)) t = t.replace(/\($/, "").replace(/^\(/, "");
+  return t.trim();
+};
+const phonesIn = (s: string) => [...s.matchAll(PHONE_RE)].map((m) => tidyPhone(m[0])).filter((p) => p.replace(/\D/g, "").length >= 8 && p.replace(/\D/g, "").length <= 15);
 
 const slugName = (name: string) => normalise(name).split(" ").filter((w) => w.length > 1 && !TITLE.test(w));
 /** Does the address itself contain the person's surname (e.g. a.meier@..., meier@...)? */
@@ -79,12 +120,32 @@ function emailBelongsTo(email: string, name: string): boolean {
   return !!last && last.length >= 3 && local.includes(last);
 }
 
+// Role words as they appear next to a name (EN/DE/FR/IT/ES/NL/PL). Kept in line with lib/roles.ts.
+const ROLE_WORDS = [
+  "gesch[aä]ftsf[uü]hrer(?:in)?", "inhaber(?:in)?", "vertretungsberechtigt\\w*", "vorstand\\w*", "verlagsleit\\w*", "verleger(?:in)?",
+  "managing director", "general manager", "chief executive(?: officer)?", "ceo", "founder", "co-?founder", "gr[uü]nder(?:in)?", "owner",
+  "publisher", "publishing director", "head of [a-z]+(?: (?:&|and|of) [a-z]+)?", "director(?: of [a-z]+)?", "einkauf\\w*",
+  "purchasing(?: (?:manager|director|lead))?", "procurement", "rights\\s*(?:&|and|und)\\s*licensing(?: (?:manager|director))?", "programmleit\\w*",
+  "editor[- ]in[- ]chief", "chefredakt\\w+", "chief [a-z]+ officer", "cfo", "coo", "cto", "cmo", "vice president",
+  // French
+  "directeur de (?:la )?publication", "directrice de (?:la )?publication", "directeur g[ée]n[ée]ral", "directrice g[ée]n[ée]rale", "pdg",
+  "pr[ée]sident(?:e)?", "g[ée]rant(?:e)?", "fondat(?:eur|rice)", "co-?fondat(?:eur|rice)", "directeur [ée]ditorial", "directrice [ée]ditoriale",
+  "[ée]diteur", "[ée]ditrice", "responsable des achats", "repr[ée]sentant(?:e)? l[ée]gal(?:e)?",
+  // Italian
+  "amministratore delegato", "amministratrice delegata", "legale rappresentante", "presidente", "fondatore", "fondatrice", "titolare",
+  "direttore editoriale", "direttrice editoriale", "direttore", "direttrice", "editore",
+  // Spanish
+  "director general", "directora general", "consejer[oa] delegad[oa]", "director editorial", "directora editorial", "fundador(?:a)?", "gerente", "representante legal",
+  // Dutch / Polish
+  "algemeen directeur", "eigenaar", "oprichter", "uitgever", "prezes(?: zarz[aą]du)?", "w[łl]a[śs]ciciel\\w*", "za[łl]o[żz]yciel\\w*", "dyrektor\\w*",
+].join("|");
+
 interface Hit { name: string; roleRaw: string; role: Role; evidence: string; adjacent: boolean }
 
 /** Pull "Name … Role" pairs out of lines. */
-function hitsFromLines(lines: string[], unresolved: string[]): Hit[] {
+function hitsFromLines(lines: string[], unresolved: string[], allowAdjacent: boolean): Hit[] {
   const hits: Hit[] = [];
-  const ROLEWORD = /(gesch[aä]ftsf[uü]hrer(?:in)?|inhaber(?:in)?|vertretungsberechtigt\w*|vorstand\w*|verlagsleit\w*|verleger(?:in)?|managing director|general manager|chief executive(?: officer)?|ceo|founder|co-?founder|gr[uü]nder(?:in)?|owner|publisher|publishing director|head of [a-z]+(?: (?:&|and|of) [a-z]+)?|director(?: of [a-z]+)?|einkauf\w*|purchasing(?: (?:manager|director|lead))?|procurement|rights\s*(?:&|and|und)\s*licensing(?: (?:manager|director))?|programmleit\w*|editor[- ]in[- ]chief|chefredakt\w+|[A-Z][a-z]+ manager)/i;
+  const ROLEWORD = new RegExp(`(?<![\\p{L}])(${ROLE_WORDS})(?![\\p{L}])`, "iu");
   const seen = new Set<string>();
   const push = (h: Hit) => {
     const k = normalise(h.name);
@@ -95,7 +156,7 @@ function hitsFromLines(lines: string[], unresolved: string[]): Hit[] {
 
   lines.forEach((line, i) => {
     const m = line.match(ROLEWORD);
-    if (!m || line.length > 400) return;
+    if (!m || line.length > 400 || isExcludedTitle(line)) return;
     const role = roleOf(m[0]);
     if (!role) return;
     const before = line.slice(0, m.index!);
@@ -112,7 +173,8 @@ function hitsFromLines(lines: string[], unresolved: string[]): Hit[] {
       if (found.length) break;
     }
     let adjacent = false;
-    if (!found.length) {
+    // Card layout only for short, role-only lines ("Head of Purchasing"), never for sentences.
+    if (!found.length && allowAdjacent && line.length <= 70) {
       // Card layout: the name is the line right before or after a role-only line.
       for (const j of [i - 1, i + 1, i - 2]) {
         const cand = lines[j];
@@ -169,13 +231,17 @@ function jsonLdPeople(html: string, pageUrl: string): Person[] {
 
 /** Everything useful and verifiable on one page. */
 export function extractFacts(html: string, pageUrl: string): PageFacts {
-  const { document } = parseHTML(html);
+  const { document } = parseHTML(asDocumentHtml(html));
   const lines = pageLines(html);
+  const contentLines = pageLines(html, true);
   const text = lines.join("\n");
   const unresolved: string[] = [];
 
   const people: Person[] = [...jsonLdPeople(html, pageUrl)];
-  for (const h of hitsFromLines(lines, unresolved)) {
+  // "Role: Name" on one line counts anywhere (imprints often sit in the footer);
+  // name-above-role cards only count outside navigation, headers and footers.
+  const hits = [...hitsFromLines(lines, unresolved, false), ...hitsFromLines(contentLines, [], true)];
+  for (const h of hits) {
     if (people.some((p) => normalise(p.name) === normalise(h.name))) continue;
     people.push({ name: h.name, role: h.role, roleRaw: h.roleRaw, sourceUrl: pageUrl, evidence: h.evidence, confidence: h.adjacent ? "medium" : "high" });
   }
@@ -193,9 +259,9 @@ export function extractFacts(html: string, pageUrl: string): PageFacts {
     } else if (/^tel:/i.test(href)) {
       const p = norm(decodeURIComponent(href.slice(4)));
       if (p.replace(/\D/g, "").length >= 8) phones.add(p);
-    } else if (/linkedin\.com\/(in|company)\//i.test(href)) {
-      const url = href.split("?")[0].replace(/\/$/, "");
-      if (/\/company\//i.test(url)) companyLinkedin ??= url;
+    } else if (cleanLinkedin(href)) {
+      const url = cleanLinkedin(href)!;
+      if (!/\/in\//i.test(url)) companyLinkedin ??= url;
       else {
         let ctx = a;
         for (let i = 0; i < 3 && ctx.parentElement && (ctx.parentElement.textContent ?? "").length < 160; i++) ctx = ctx.parentElement;
@@ -224,6 +290,12 @@ export function extractFacts(html: string, pageUrl: string): PageFacts {
     unresolved: unresolved.slice(0, 6),
     text,
   };
+}
+
+/** A LinkedIn profile address trimmed to the profile itself ("…/school/7328964/admin/dashboard" -> "…/school/7328964"). */
+export function cleanLinkedin(href: string): string | undefined {
+  const m = href.match(/^(?:https?:)?\/\/(?:[a-z]{2,3}\.|www\.)?linkedin\.com\/(in|company|school|showcase)\/([^/?#\s]+)/i);
+  return m ? `https://www.linkedin.com/${m[1].toLowerCase()}/${m[2]}` : undefined;
 }
 
 /** True if `value` is written on the page (whitespace and case insensitive). */
@@ -282,11 +354,26 @@ export function selfCheck(): string {
   // nothing to find -> nothing invented
   eq(extractFacts("<html><body><p>Wir lieben Bücher. Besuchen Sie uns!</p></body></html>", "https://x.de").people, [], "empty page");
 
+  // navigation and cookie text are not people; "Director" inside a word is not a role
+  const chrome = `<html><body><nav><div>Event Calendar</div><div>Director</div></nav><div class="cookie-banner"><div>FAQ Visitors</div><div>Cookie settings</div></div>
+    <main><p>Für Verhandlungen ist der Inhaber zuständig.</p><div><div>Maria Lopez</div><div>CEO</div></div><p>Programme Director's Cut</p></main></body></html>`;
+  eq(extractFacts(chrome, "https://x.de").people.map((p) => p.name), ["Maria Lopez"], "chrome and stop words ignored");
+  eq(extractFacts("", "https://x.de").people, [], "empty page does not crash");
+  eq(extractFacts("<div>Anna Meier</div><div>Author / IP Owner</div>", "https://x.de").people, [], "IP owner is not a decision-maker");
+
+  eq(extractFacts("<p>Dyrektor handlowy: Jan Nowak</p><p>handlowy@firma.pl</p>", "https://firma.pl").people[0]?.email, undefined, "Polish sales mailbox is not the person's email");
+  eq(cleanLinkedin("https://www.linkedin.com/school/7328964/admin/dashboard"), "https://www.linkedin.com/school/7328964", "linkedin admin url trimmed");
+  eq(cleanLinkedin("https://pl.linkedin.com/company/abedik?trk=x"), "https://www.linkedin.com/company/abedik", "country subdomain + query");
+  const fr = extractFacts("<html><body><h1>Mentions légales</h1><p>Directeur de la publication : Claire Dubois</p><p>Gérant : Marc Lefèvre</p></body></html>", "https://x.fr/mentions-legales");
+  eq(fr.people.map((p) => `${p.name}|${p.role}`), ["Claire Dubois|md", "Marc Lefèvre|owner"], "French imprint");
+  const it = extractFacts("<html><body><p>Amministratore delegato: Giulia Rossi</p></body></html>", "https://x.it/note-legali");
+  eq(it.people.map((p) => `${p.name}|${p.role}`), ["Giulia Rossi|ceo"], "Italian imprint");
+
   // AI guard
   const text = "Our team. Maria Lopez is our Managing Director. Reach her at maria@acme.com. Bob Fake";
   eq(guardAiPerson({ name: "Maria Lopez", role: "Managing Director", email: "maria@acme.com" }, text, "u")?.email, "maria@acme.com", "ai ok");
   eq(guardAiPerson({ name: "Maria Lopez", role: "Managing Director", email: "m.lopez@acme.com" }, text, "u")?.email, undefined, "ai email not on page dropped");
   eq(guardAiPerson({ name: "John Smith", role: "CEO" }, text, "u"), null, "ai name not on page dropped");
   eq(guardAiPerson({ name: "Bob Fake", role: "CEO" }, text + " " + "x".repeat(400) + " CEO", "u"), null, "ai role too far dropped");
-  return "people ok (16 checks)";
+  return "people ok (24 checks)";
 }

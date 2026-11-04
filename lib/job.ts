@@ -7,9 +7,10 @@
  * after every step, and an interrupted job resumes where it stopped instead
  * of starting over or silently truncating.
  */
-import { crawlPages, fetchChunk, HttpError, LockedError, readItemBatch, type CrawlRequest } from "./client-api";
+import { crawlPages, fetchChunk, HttpError, LockedError, lookupBatch, readItemBatch, type CrawlRequest } from "./client-api";
 import type { Format } from "./exporters";
 import { assemble, specFor, urlsFor, type ItemResult } from "./items-client";
+import { companiesFrom, joinLeads, leadFieldNames, type CompanyRef, type LeadsState } from "./leads";
 import { feedRows, hasPageContent, pageRows, type Feed, type PageList, type Row, type Workspace } from "./model";
 
 export type Scope = "page" | "feed" | "crawl";
@@ -25,13 +26,15 @@ export interface JobInput {
   crawl?: CrawlRequest;
   /** Signed in with a cookie or session: never written to disk. */
   gated?: boolean;
+  /** Look up each company's decision-makers after the rows (and item pages) are in. */
+  leads?: LeadsState;
 }
 
 export interface Job extends JobInput {
   id: string;
   createdAt: number;
   updatedAt: number;
-  stage: "rows" | "items" | "done" | "failed";
+  stage: "rows" | "items" | "people" | "done" | "failed";
   raw: Row[];                           // feed rows fetched, or captured rows
   nextIndex: number;                    // feed page to resume from
   total: number | null;
@@ -77,10 +80,27 @@ export function baseRows(job: Pick<Job, "scope" | "ws" | "list" | "feed" | "raw"
   return { rows, urls: urlsFor(source, undefined, feed?.rows ?? [], true) };
 }
 
-/** The finished table: base rows with item-page columns joined in. */
+/** The finished table: base rows with item-page columns, then lead columns, joined in. */
 export function finalRows(job: Job): Row[] {
   const { rows, urls } = baseRows(job);
-  return assemble(rows, urls, job.ws.columns, job.results);
+  const out = assemble(rows, urls, job.ws.columns, job.results);
+  return job.leads?.config.on ? joinLeads(out, job.leads.config, job.leads.results, leadNames(job)) : out;
+}
+
+/** The lead column names for this job (renamed where they clash with the user's columns). */
+export const leadNames = (job: Pick<Job, "ws">) => leadFieldNames(job.ws.columns.filter((c) => c.on).map((c) => c.name));
+
+/** Column names written to the file: the user's columns, then the lead columns. */
+export function exportFields(job: Job): string[] {
+  const own = job.ws.columns.filter((c) => c.on).map((c) => c.name);
+  return job.leads?.config.on ? [...own, ...Object.values(leadNames(job))] : own;
+}
+
+/** The companies this job looks up (one per company, in row order). */
+export function companiesOf(job: Job): CompanyRef[] {
+  if (!job.leads) return [];
+  const { rows, urls } = baseRows(job);
+  return companiesFrom(rows, urls, job.leads.config);
 }
 
 export function itemUrls(job: Job): string[] {
@@ -217,7 +237,7 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
         if (summary.stoppedBy === "limit") job.note = `Stopped at your ${job.crawl.maxPages}-page limit.`;
         if (summary.stoppedBy === "time") job.note = `Stopped after ${summary.pages} pages at the 5-minute limit for page-by-page capture.`;
       }
-      job.stage = specFor(job.ws) ? "items" : "done";
+      job.stage = specFor(job.ws) ? "items" : job.leads?.config.on ? "people" : "done";
       await saveJob(job);
       report();
     }
@@ -242,6 +262,55 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           }
         }));
       }
+      job.stage = job.leads?.config.on ? "people" : "done";
+      await saveJob(job);
+    }
+
+    if (job.stage === "people" && job.leads) {
+      const L = job.leads;
+      const companies = companiesOf(job);
+      L.companyCount = companies.length;
+      let fairHost: string | undefined;
+      try {
+        fairHost = new URL(job.scanUrl).hostname;
+      } catch {
+        fairHost = undefined;
+      }
+      const queue = companies.filter((c) => !L.results[c.id]);
+      const lanes = 2;
+      await Promise.all(Array.from({ length: lanes }, async () => {
+        while (queue.length) {
+          const batch = queue.splice(0, 12);
+          // Reserve this batch's share of the run's AI web-search budget up front (two lanes share it).
+          const grant = L.quotaMessage ? 0 : Math.max(0, Math.min(3, L.config.aiSearch - L.aiSearchesUsed));
+          L.aiSearchesUsed += grant;
+          status = "";
+          let out;
+          try {
+            out = await withRetry("Looking up companies", () => lookupBatch({ companies: batch, fairHost, useAi: !L.quotaMessage, aiSearch: grant }, signal), signal, wait);
+          } catch (e) {
+            L.aiSearchesUsed -= grant;
+            queue.unshift(...batch);
+            throw e;
+          }
+          L.aiSearchesUsed -= grant - Math.min(grant, out.ai.searches);
+          L.aiRequests += out.ai.requests;
+          L.aiTokens += out.ai.tokens;
+          if (out.ai.quotaMessage) L.quotaMessage = out.ai.quotaMessage; // shown to the user; AI is not used again this run
+          for (const n of out.notices) if (!L.notices.includes(n) && L.notices.length < 5) L.notices.push(n);
+          for (const r of out.results) L.results[r.id] = r;
+          for (const id of out.pending) {
+            const c = batch.find((b) => b.id === id);
+            if (!c) continue;
+            L.attempts[id] = (L.attempts[id] ?? 0) + 1;
+            if (L.attempts[id] >= 3) {
+              L.results[id] = { id, name: c.name, people: [], pages: [], notes: ["The lookup took too long three times and was skipped."] };
+            } else queue.push(c); // not finished in that call's time: back in line
+          }
+          await saveJob(job);
+          report();
+        }
+      }));
       job.stage = "done";
       await saveJob(job);
     }
@@ -268,6 +337,11 @@ export function progressOf(job: Job, status = ""): Progress {
     const all = itemUrls(job);
     const done = all.filter((u) => job.results[u]).length;
     return { stage: "items", label: status || "Reading each item's page", done, of: all.length };
+  }
+  if (job.stage === "people" && job.leads) {
+    const companies = companiesOf(job);
+    const done = companies.filter((c) => job.leads!.results[c.id]).length;
+    return { stage: "people", label: status || "Looking up each company's decision-makers", done, of: companies.length };
   }
   return { stage: job.stage, label: status, done: 0, of: null };
 }

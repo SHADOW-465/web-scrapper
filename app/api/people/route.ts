@@ -1,5 +1,5 @@
 import { denied, hasAccess } from "@/lib/access";
-import { lookupCompany, publicResult, resolveHardCases, type CompanyInput, type CompanyResult } from "@/lib/company";
+import { aiWebsiteCandidates, fetchPage, lookupCompany, publicResult, resolveHardCases, type CompanyInput, type CompanyResult, type WebsiteSearch } from "@/lib/company";
 import { AiQuotaError, aiEnabled, takeUsage } from "@/lib/groq";
 import { ndjson } from "@/lib/ndjson";
 import { safeMessage } from "@/lib/redact";
@@ -9,16 +9,18 @@ export const maxDuration = 90; // a batch must finish well inside this; the clie
 
 const BATCH = 12;      // companies per call
 const PARALLEL = 6;    // companies looked up at once
-const BUDGET_MS = 55_000;
+const BUDGET_MS = 50_000;   // start no new company after this
+const HARD_MS = 70_000;     // no page fetch starts after this; such companies are sent back as pending
 
 interface Body {
-  companies?: Array<{ id?: unknown; name?: unknown; country?: unknown; website?: unknown }>;
+  companies?: Array<{ id?: unknown; name?: unknown; country?: unknown; website?: unknown; profileUrl?: unknown }>;
   fairHost?: unknown;   // the marketplace's own host, never treated as a company website
   useAi?: unknown;
+  aiSearch?: unknown;   // how many AI web searches this batch may spend (0-3); the browser keeps the run's budget
 }
 
 /**
- * POST { companies:[{id,name,country?,website?}], fairHost?, useAi? } -> NDJSON:
+ * POST { companies:[{id,name,country?,website?,profileUrl?}], fairHost?, useAi? } -> NDJSON:
  *   `company` per company as it finishes, an `ai` usage event, then `done` { pending: ids not reached in time }.
  */
 export async function POST(req: Request) {
@@ -30,35 +32,73 @@ export async function POST(req: Request) {
       name: String(c.name ?? "").trim().slice(0, 160),
       country: typeof c.country === "string" ? c.country.slice(0, 60) : undefined,
       website: typeof c.website === "string" ? c.website.slice(0, 300) : undefined,
+      profileUrl: typeof c.profileUrl === "string" && /^https?:\/\//i.test(c.profileUrl) ? c.profileUrl.slice(0, 500) : undefined,
     }))
     .filter((c) => c.id && c.name)
     .slice(0, BATCH);
   if (!companies.length) return Response.json({ error: "no_companies", message: "No companies were sent." }, { status: 400 });
   const fairHost = typeof body.fairHost === "string" ? body.fairHost.slice(0, 120) : undefined;
   const useAi = body.useAi !== false && aiEnabled();
+  let searchesLeft = useAi ? Math.max(0, Math.min(3, Number(body.aiSearch) || 0)) : 0;
 
   return ndjson(async (emit, signal) => {
     const deadline = Date.now() + BUDGET_MS;
+    let quota: string | undefined;
+    let searchesUsed = 0;
+    // AI web search, one at a time (8K tokens/min on the free tier), only while budget, time and quota allow.
+    let searchLock: Promise<unknown> = Promise.resolve();
+    const search: WebsiteSearch | undefined = searchesLeft
+      ? (name, country) => {
+          const next = searchLock.then(async () => {
+            if (searchesLeft <= 0 || quota || Date.now() > deadline - 15_000) return [];
+            searchesLeft--;
+            searchesUsed++;
+            try {
+              return await aiWebsiteCandidates(name, country);
+            } catch (e) {
+              if (e instanceof AiQuotaError) quota = e.message;
+              else emit({ type: "notice", message: `AI web search failed: ${safeMessage(e)}` });
+              return [];
+            }
+          });
+          searchLock = next.catch(() => undefined);
+          return next;
+        }
+      : undefined;
     const queue = [...companies];
     const done: CompanyResult[] = [];
+    const hardStop = Date.now() + HARD_MS;
+    const late: CompanyInput[] = [];
     await Promise.all(
       Array.from({ length: PARALLEL }, async () => {
         while (queue.length && Date.now() < deadline && !signal.aborted) {
           const c = queue.shift()!;
+          let cut = false;
+          // Past the hard stop no new page is fetched, so the call ends inside the function limit.
+          const fetcher = (u: string, cap?: number) => {
+            if (Date.now() > hardStop || signal.aborted) {
+              cut = true;
+              return Promise.resolve(null);
+            }
+            return fetchPage(u, cap);
+          };
           try {
-            const r = await lookupCompany(c, undefined, fairHost);
-            done.push(r);
-            emit({ type: "company", ...publicResult(r) });
+            const r = await lookupCompany(c, fetcher, fairHost, search);
+            if (cut) late.push(c); // incomplete: not "nothing found", just not finished
+            else {
+              done.push(r);
+              emit({ type: "company", ...publicResult(r) });
+            }
           } catch (e) {
             emit({ type: "company", id: c.id, name: c.name, people: [], pages: [], notes: [`Lookup failed: ${safeMessage(e)}`] });
           }
         }
       }),
     );
+    queue.unshift(...late);
 
     // Hard cases: one Groq request for the companies where code found a role but no clear name.
-    let quota: string | undefined;
-    if (useAi && Date.now() < deadline + 10_000) {
+    if (useAi && !quota && Date.now() < deadline + 10_000) {
       try {
         const before = done.map((d) => d.people.length);
         await resolveHardCases(done);
@@ -70,7 +110,7 @@ export async function POST(req: Request) {
         else emit({ type: "notice", message: `AI step skipped: ${safeMessage(e)}` });
       }
     }
-    emit({ type: "ai", enabled: aiEnabled(), quotaMessage: quota, ...takeUsage() });
+    emit({ type: "ai", enabled: aiEnabled(), quotaMessage: quota, searches: searchesUsed, ...takeUsage() });
     emit({ type: "done", pending: queue.map((c) => c.id) });
   });
 }

@@ -10,7 +10,8 @@
  */
 import { scrub } from "./redact";
 
-const ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+// GROQ_BASE_URL lets local tests point at a fake Groq; it is ignored in production so the key only ever goes to Groq.
+const ENDPOINT = `${(process.env.NODE_ENV !== "production" && !process.env.VERCEL && process.env.GROQ_BASE_URL) || "https://api.groq.com/openai/v1"}/chat/completions`;
 const MAX_WAIT_S = 20; // wait this long for a per-minute limit; anything longer is a different model's turn
 
 export const aiEnabled = () => !!process.env.GROQ_API_KEY;
@@ -22,7 +23,7 @@ export const models = () => [
 export class AiQuotaError extends Error {
   constructor(public scope: "day" | "minute", public resetInSeconds: number) {
     const when = resetInSeconds >= 3600 ? `about ${Math.ceil(resetInSeconds / 3600)} h` : resetInSeconds >= 90 ? `about ${Math.ceil(resetInSeconds / 60)} min` : `${Math.max(1, Math.ceil(resetInSeconds))} s`;
-    super(`Groq's free limit is used up (${scope === "day" ? "daily" : "per-minute"} limit, HTTP 429). It resets in ${when}. Results below were found without AI.`);
+    super(`Groq's free limit is used up (${scope === "day" ? "daily" : "per-minute"} limit, HTTP 429). It resets in ${when}; until then, lookups carry on without AI.`);
     this.name = "AiQuotaError";
   }
 }
@@ -34,6 +35,12 @@ export class AiError extends Error {
 }
 
 /* ------------------------------------------------------------ state (per server instance) */
+
+export interface Limits { remainingRequests?: number; remainingTokens?: number; resetRequests?: string; resetTokens?: string; at: number }
+const limits = new Map<string, Limits>();
+const num = (v: string | null) => (v != null && v !== "" && !Number.isNaN(Number(v)) ? Number(v) : undefined);
+/** The latest rate-limit headers Groq sent, per model (this server instance only). */
+export const latestLimits = () => Object.fromEntries(limits);
 
 const blockedUntil = new Map<string, { until: number; scope: "day" | "minute" }>();
 const cache = new Map<string, { at: number; value: unknown }>();
@@ -56,6 +63,7 @@ export function __setTransport(f?: FetchFn, s?: (ms: number) => Promise<void>) {
   doFetch = f ?? ((...a) => fetch(...a));
   sleepFn = s ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   blockedUntil.clear();
+  limits.clear();
   cache.clear();
   notice = null;
   usage.requests = usage.tokens = usage.cached = 0;
@@ -88,15 +96,22 @@ export interface GroqOptions<T> {
 interface Attempt { ok: true; text: string; tokens: number }
 type Failure = { ok: false; kind: "quota"; scope: "day" | "minute"; wait: number } | { ok: false; kind: "bad" | "error"; message: string };
 
-async function call(model: string, system: string, user: string, maxTokens: number, withReasoning: boolean): Promise<Attempt | Failure> {
+interface CallShape { json: boolean; search?: boolean }
+
+async function call(model: string, system: string, user: string, maxTokens: number, withReasoning: boolean, shape: CallShape = { json: true }): Promise<Attempt | Failure> {
   const key = process.env.GROQ_API_KEY!;
   const body: Record<string, unknown> = {
     model,
     temperature: 0,
     max_completion_tokens: maxTokens,
-    response_format: { type: "json_object" },
     messages: [{ role: "system", content: system }, { role: "user", content: user }],
   };
+  // Groq's built-in browser search can't be combined with structured (JSON) output.
+  if (shape.json && !shape.search) body.response_format = { type: "json_object" };
+  if (shape.search) {
+    body.tools = [{ type: "browser_search" }];
+    body.tool_choice = "required";
+  }
   if (withReasoning) {
     body.reasoning_effort = "low"; // reasoning tokens count against the free limits
     body.include_reasoning = false;
@@ -113,6 +128,13 @@ async function call(model: string, system: string, user: string, maxTokens: numb
     return { ok: false, kind: "error", message: `Could not reach Groq: ${scrub(e instanceof Error ? e.message : e, [key])}` };
   }
   usage.requests++;
+  limits.set(model, {
+    remainingRequests: num(res.headers.get("x-ratelimit-remaining-requests")),
+    remainingTokens: num(res.headers.get("x-ratelimit-remaining-tokens")),
+    resetRequests: res.headers.get("x-ratelimit-reset-requests") ?? undefined,
+    resetTokens: res.headers.get("x-ratelimit-reset-tokens") ?? undefined,
+    at: Date.now(),
+  });
   if (res.status === 429) {
     const text = await res.text().catch(() => "");
     const retry = parseDuration(res.headers.get("retry-after")) ?? parseDuration(res.headers.get("x-ratelimit-reset-requests")) ?? parseDuration(res.headers.get("x-ratelimit-reset-tokens")) ?? 30;
@@ -121,7 +143,7 @@ async function call(model: string, system: string, user: string, maxTokens: numb
   }
   if (res.status === 400 && withReasoning) {
     const text = await res.text().catch(() => "");
-    if (/reasoning|include_reasoning/i.test(text)) return call(model, system, user, maxTokens, false);
+    if (/reasoning|include_reasoning/i.test(text)) return call(model, system, user, maxTokens, false, shape);
     return { ok: false, kind: "error", message: `Groq rejected the request (400): ${scrub(text.slice(0, 200), [key])}` };
   }
   if (!res.ok) {
@@ -151,13 +173,27 @@ function parseJson(text: string): unknown {
  * Throws AiQuotaError when every model is rate-limited, AiError for other failures.
  */
 export async function groqJson<T = unknown>(kind: string, system: string, user: string, opts: GroqOptions<T> = {}): Promise<T> {
+  return (await run(kind, system, user, opts, { json: true })).value as T;
+}
+
+/**
+ * Ask a question Groq answers after searching the web itself (built-in browser_search,
+ * gpt-oss models only). Returns plain text. Search results count as input tokens, so
+ * each call costs thousands of tokens of the free daily budget: use sparingly.
+ */
+export async function groqSearch(kind: string, system: string, user: string, maxTokens = 700): Promise<{ text: string; model: string; tokens: number }> {
+  const r = await run(kind, system, user, { maxTokens }, { json: false, search: true });
+  return { text: String(r.value ?? ""), model: r.model, tokens: r.tokens };
+}
+
+async function run<T>(kind: string, system: string, user: string, opts: GroqOptions<T>, shape: CallShape): Promise<{ value: unknown; model: string; tokens: number }> {
   if (!aiEnabled()) throw new AiError("AI is off: GROQ_API_KEY is not set.");
   const maxTokens = opts.maxTokens ?? 2500;
-  const ck = await sha(`${kind}\n${system}\n${user}`);
+  const ck = await sha(`${kind}\n${shape.search ? "search" : "json"}\n${system}\n${user}`);
   const hit = cache.get(ck);
   if (hit && Date.now() - hit.at < 6 * 3600_000) {
     usage.cached++;
-    return hit.value as T;
+    return { value: hit.value, model: "cache", tokens: 0 };
   }
 
   let quota: AiQuotaError | null = null;
@@ -169,15 +205,16 @@ export async function groqJson<T = unknown>(kind: string, system: string, user: 
       continue;
     }
     for (let attempt = 0; attempt < 2; attempt++) {
-      const r = await call(model, system, user, maxTokens, true);
+      const r = await call(model, system, user, maxTokens, true, shape);
       if (r.ok) {
         try {
-          const value = parseJson(r.text);
+          const value = shape.json ? parseJson(r.text) : r.text.trim();
+          if (!shape.json && !value) throw new Error("empty");
           if (opts.validate && !opts.validate(value)) throw new Error("invalid shape");
           cache.set(ck, { at: Date.now(), value });
           if (cache.size > 200) cache.delete(cache.keys().next().value as string);
           notice = null;
-          return value as T;
+          return { value, model, tokens: r.tokens };
         } catch {
           lastError = `${model} returned output that was not usable`;
           break; // next model
@@ -256,8 +293,20 @@ export async function selfCheckAsync(): Promise<string> {
   await groqJson("t", "s", "u4");
   eq(seen.length, 0, "cached call makes no request");
 
+  // web search: browser_search tool, no JSON mode, plain-text answer
+  __setTransport(async (_u, init) => {
+    const b = JSON.parse(String(init?.body));
+    seen.length = 0;
+    seen.push(JSON.stringify({ tools: b.tools, json: !!b.response_format, effort: b.reasoning_effort }));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "https://muster-verlag.de" } }], usage: { total_tokens: 3100 } }), { status: 200, headers: { "x-ratelimit-remaining-tokens": "4900" } });
+  }, noSleep);
+  const sr = await groqSearch("s", "find", "Muster Verlag");
+  eq(sr.text, "https://muster-verlag.de", "search answer");
+  eq(seen[0], JSON.stringify({ tools: [{ type: "browser_search" }], json: false, effort: "low" }), "search request shape");
+  eq(latestLimits()["openai/gpt-oss-20b"]?.remainingTokens, 4900, "rate-limit headers recorded");
+
   eq(parseDuration("2m59.56s"), 179.56, "duration");
   __setTransport();
   delete process.env.GROQ_API_KEY;
-  return "groq ok (fallback, retry, quota, bad json, cache)";
+  return "groq ok (fallback, retry, quota, bad json, cache, search, limits)";
 }

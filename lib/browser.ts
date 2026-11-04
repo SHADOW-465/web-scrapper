@@ -64,7 +64,12 @@ export async function launch(): Promise<Browser> {
   if (!executablePath) {
     throw new Error("No Chrome found for local development. Install Google Chrome, or set CHROME_PATH to a Chrome/Chromium executable.");
   }
-  return puppeteer.launch({ executablePath, headless: true, defaultViewport: VIEWPORT, args: ["--no-first-run", "--disable-dev-shm-usage"] });
+  const { devProxy } = await import("./ssrf");
+  const proxy = devProxy() && (process.env.HTTPS_PROXY || process.env.https_proxy);
+  return puppeteer.launch({
+    executablePath, headless: true, defaultViewport: VIEWPORT,
+    args: ["--no-first-run", "--disable-dev-shm-usage", ...(proxy ? [`--proxy-server=${proxy}`, "--no-sandbox"] : [])],
+  });
 }
 
 /** Parse a pasted Cookie header ("a=1; b=2") into puppeteer cookies for one site. */

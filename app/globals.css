@@ -372,6 +372,32 @@ input.mini[type="number"] { width: 68px; font-family: var(--font-mono); }
 .note.err { color: var(--danger); }
 .note.ok { color: var(--ok); }
 
+/* ------------------------------------------------------------ decision-makers */
+
+.leads .switchrow { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; align-items: start; cursor: pointer; }
+.leads .switchrow input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--graphite); }
+.leads .switchrow b { display: block; font-size: 13.5px; }
+.leads .switchrow small { display: block; font-size: 12.5px; color: var(--graphite-3); margin-top: 2px; line-height: 1.45; }
+.leadgrid { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 6px 10px; align-items: center; margin: 12px 0 8px; font-size: 13px; }
+.leadgrid label { color: var(--graphite-2); font-weight: 600; font-size: 12.5px; }
+.leadgrid select, .leadgrid input[type=number] {
+  height: 32px; min-width: 0; width: 100%; padding: 0 8px; border: 1px solid var(--rule-strong);
+  border-radius: var(--r-2); background: var(--paper); font-size: 13px;
+}
+.leadgrid select:focus, .leadgrid input:focus { outline: 0; border-color: var(--graphite); box-shadow: 0 0 0 3px rgba(29, 31, 34, 0.1); }
+.limitrow { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.limitrow input[type=number] { width: 84px; flex: none; }
+.limitrow small { font-size: 11.5px; color: var(--graphite-3); line-height: 1.35; }
+.aibox { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--rule); border-radius: var(--r-2); background: var(--chrome); display: grid; gap: 6px; }
+.aihead { display: flex; gap: 7px; align-items: center; font-size: 12.5px; color: var(--graphite-2); }
+.aihead > span { flex: 1; min-width: 0; }
+.aihead code, .leads code { font-size: 11.5px; background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; padding: 0 4px; }
+.aibox .leadgrid { margin: 4px 0 0; }
+.aibox .extra { margin-top: 2px; }
+.tryrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+td a.cell-link { color: inherit; text-decoration: underline; text-decoration-color: var(--rule-strong); }
+td a.cell-link:hover { text-decoration-color: var(--graphite); }
+
 /* ------------------------------------------------------------ preview */
 
 .preview {

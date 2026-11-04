@@ -2,14 +2,16 @@
 
 import { AlertTriangle, ArrowRight, Bookmark, BookmarkPlus, Check, Download, EyeOff, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { fetchChunk, LockedError, sampleItems, scanPage, ScanError, SkippedItemsError, unlock, type CrawlRequest, type ScanResult } from "@/lib/client-api";
+import { aiStatus, fetchChunk, LockedError, lookupBatch, sampleItems, scanPage, ScanError, SkippedItemsError, unlock, type AiStatus, type CrawlRequest, type ScanResult } from "@/lib/client-api";
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
 import { discoveryRequest, fillPattern, findItemSource, sourceFromPastedUrl, specFor, spread, widerRows } from "@/lib/items-client";
-import { deleteJob, failedItems, finalRows, loadJobs, newJob, progressOf, runJob, type Job, type Progress } from "@/lib/job";
-import { extraFields, findDirectoryLinksInHtml, listRowCount, looksLikeNavigation, matchList, pageOnly, visiblePageRows, type DirectoryLink, type ItemSource, type Row, type Workspace } from "@/lib/model";
+import { baseRows, deleteJob, exportFields, failedItems, finalRows, leadNames, loadJobs, newJob, progressOf, runJob, type Job, type Progress } from "@/lib/job";
+import { companiesFrom, guessLeadColumns, joinLeads, newLeadsState, type LeadResult, type LeadsConfig } from "@/lib/leads";
+import { extraFields, findDirectoryLinksInHtml, listRowCount, looksLikeNavigation, matchList, pageOnly, visiblePageRows, type Column, type DirectoryLink, type ItemSource, type Row, type Workspace } from "@/lib/model";
 import { deleteRecipe, loadRecipes, saveRecipe, type Recipe } from "@/lib/recipes";
 import { initial, reducer } from "@/lib/studio-state";
 import { Failed, Locked, Printing, Welcome } from "./Blank";
+import { LeadsPanel, type TrySummary } from "./Leads";
 import Mark from "./Mark";
 import Preview from "./Preview";
 import Recipes from "./Recipes";
@@ -66,6 +68,14 @@ export default function Studio() {
   const [layoutMissing, setLayoutMissing] = useState(false);
   const [iframeReady, setIframeReady] = useState(false);
   const [tableOnly, setTableOnly] = useState(false);
+  const [leadsCfg, setLeadsCfg] = useState<LeadsConfig | null>(null);
+  const [ai, setAi] = useState<AiStatus | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [testingAi, setTestingAi] = useState(false);
+  const [leadPreview, setLeadPreview] = useState<Record<string, LeadResult>>({});
+  const [trying, setTrying] = useState<string | null>(null);
+  const [tried, setTried] = useState<TrySummary | null>(null);
+  const [tryError, setTryError] = useState<string | null>(null);
 
   const sheet = useRef<SheetHandle>(null);
   const abort = useRef<AbortController | null>(null);
@@ -92,6 +102,7 @@ export default function Studio() {
     void refreshResumable();
     fetch("/api/access").then((r) => r.json()).then((a: { required: boolean; ok: boolean }) => {
       if (a.required && !a.ok) setPhase("locked");
+      else aiStatus().then(setAi, (e) => setAiError(e instanceof Error ? e.message : String(e)));
     }).catch(() => undefined);
   }, [refreshResumable]);
 
@@ -117,6 +128,9 @@ export default function Studio() {
     setScopeTouched(!!pending.current);
     gotReady.current = false;
     looking.current.clear();
+    setLeadPreview({});
+    setTried(null);
+    setTryError(null);
     dispatch({ type: "reset" });
     try {
       const r = await scanPage(u, cookie.trim() || undefined, (s) => setStatus((p) => [...p, s]), ac.signal);
@@ -245,6 +259,24 @@ export default function Studio() {
   const crawlAvailable = !!activeList && activeList.itemSelector !== "body" && ws?.columns.some((c) => c.page);
   const extras = useMemo(() => (ws ? extraFields(ws, feed) : []), [ws, feed]);
   const onCols = ws?.columns.filter((c) => c.on) ?? [];
+  const onNames = onCols.map((c) => c.name);
+
+  // Decision-makers: pick the company-name column for each dataset, keep the user's choice while it stays valid.
+  useEffect(() => {
+    if (!ws) return;
+    setLeadsCfg((cur) => {
+      if (cur && onNames.includes(cur.nameCol) && cur.listId === ws.listId) return cur;
+      const g = guessLeadColumns(ws.columns, pageRowList);
+      if (!g) return cur ? { ...cur, on: false } : null;
+      return { on: cur?.listId === ws.listId ? cur.on : true, ...g, limit: cur?.limit ?? null, aiSearch: cur?.aiSearch ?? 10, listId: ws.listId };
+    });
+  }, [ws?.listId, onNames.join("\u0000"), pageRowList.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  const leadsOn = !!leadsCfg?.on && !!ws && onNames.includes(leadsCfg.nameCol);
+  const leadSig = leadsOn && leadsCfg ? [leadsCfg.nameCol, leadsCfg.countryCol, leadsCfg.websiteCol, leadsCfg.limit].join("|") : "";
+  const leadColumns: Column[] = useMemo(() => {
+    if (!leadsOn || !ws) return [];
+    return Object.values(leadNames({ ws })).map((name) => ({ id: `lead:${name}`, name, ink: "#e8e3d4", on: true, sample: "" }));
+  }, [leadsOn, ws]);
 
   useEffect(() => {
     if (scopeTouched || !ws) return;
@@ -339,13 +371,16 @@ export default function Studio() {
   /* -------------------------------------------------------- preview */
 
   const crawlSelection = (w: Workspace) => JSON.stringify(w.columns.filter((c) => c.on && c.page).map((c) => ({name:c.name,page:c.page})));
+  const jobLeadSig = (j: Job) => (j.leads?.config.on ? [j.leads.config.nameCol, j.leads.config.countryCol, j.leads.config.websiteCol, j.leads.config.limit].join("|") : "");
   const runMatches = !!run && !!ws && run.job.scanUrl === scan?.finalUrl && run.job.ws.listId === ws.listId && run.job.scope === scope && run.state !== "error"
+    && jobLeadSig(run.job) === leadSig
     && (scope !== "crawl" || (run.job.crawl?.maxPages === maxPages && run.job.crawl?.mode === crawlMode && crawlSelection(run.job.ws) === crawlSelection(ws)));
   const rows: Row[] = useMemo(() => {
     if (!ws) return [];
     if (runMatches && run) return finalRows({ ...run.job, ws });
-    return pageRowList;
-  }, [ws, pageRowList, run, runMatches]);
+    // Before an export: this page's rows, with any trial lookups joined in.
+    return leadsOn && leadsCfg ? joinLeads(pageRowList, leadsCfg, leadPreview, leadNames({ ws })) : pageRowList;
+  }, [ws, pageRowList, run, runMatches, leadsOn, leadsCfg, leadPreview]);
 
   /* -------------------------------------------------------- snapshot paint */
 
@@ -367,8 +402,7 @@ export default function Studio() {
 
   async function deliver(job: Job) {
     const out = finalRows(job);
-    const fields = job.ws.columns.filter((c) => c.on).map((c) => c.name);
-    const { blob, filename } = await buildFile(job.format, out, fields, job.title);
+    const { blob, filename } = await buildFile(job.format, out, exportFields(job), job.title);
     download(blob, filename);
     return { count: out.length, filename };
   }
@@ -389,7 +423,7 @@ export default function Studio() {
       const failed = failedItems(done).length;
       setRun({
         job: done, progress: progressOf(done), state: "done",
-        message: `${fmtN(count)} rows saved to ${filename}.${failed ? ` ${fmtN(failed)} item pages couldn't be read; their columns are empty.` : ""}${done.note ? ` ${done.note}` : ""}`,
+        message: `${fmtN(count)} rows saved to ${filename}.${failed ? ` ${fmtN(failed)} item pages couldn't be read; their columns are empty.` : ""}${done.note ? ` ${done.note}` : ""}${leadSummary(done)}`,
       });
       await deleteJob(done.id);
     } catch (e) {
@@ -413,7 +447,7 @@ export default function Studio() {
     const spec = specFor(ws);
 
     // Rows already here and nothing to visit: instant.
-    if (scope === "page" && !spec) {
+    if (scope === "page" && !spec && !leadsOn) {
       const out = pageRowList;
       const { blob, filename } = await buildFile(format, out, onCols.map((c) => c.name), title);
       download(blob, filename);
@@ -444,7 +478,66 @@ export default function Studio() {
         },
       };
     }
-    await execute(newJob({ title, format, scanUrl: scan.finalUrl, scope, ws, list: activeList, feed, crawl, gated: !!cookie.trim() }));
+    await execute(newJob({
+      title, format, scanUrl: scan.finalUrl, scope, ws, list: activeList, feed, crawl, gated: !!cookie.trim(),
+      // Companies already looked up in a trial run are not looked up again.
+      leads: leadsOn && leadsCfg ? newLeadsState(stripCfg(leadsCfg), leadPreview) : undefined,
+    }));
+  }
+
+  async function testAi() {
+    setTestingAi(true);
+    try {
+      setAi(await aiStatus(true));
+      setAiError(null);
+    } catch (e) {
+      if (e instanceof LockedError) return setPhase("locked");
+      setAiError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTestingAi(false);
+    }
+  }
+
+  async function tryLeads() {
+    if (!ws || !scan || !leadsCfg) return;
+    const { rows: base, urls } = baseRows({ scope: "page", ws, list: activeList, feed, raw: [] });
+    const companies = companiesFrom(base, urls, { ...leadsCfg, limit: 5 });
+    if (!companies.length) return setTryError(`No company names in the "${leadsCfg.nameCol}" column on this page.`);
+    const signal = abort.current?.signal;
+    setTryError(null);
+    setTried(null);
+    setTrying(`Looking up ${companies.length} companies (about 20–40 s)…`);
+    try {
+      const found: Record<string, LeadResult> = {};
+      let queue = companies;
+      let quota: string | undefined;
+      const notes: string[] = [];
+      for (let pass = 0; pass < 2 && queue.length; pass++) {
+        const out = await lookupBatch({ companies: queue, fairHost: new URL(scan.finalUrl).hostname, useAi: true, aiSearch: Math.min(2, leadsCfg.aiSearch) }, signal);
+        for (const r of out.results) found[r.id] = r;
+        quota ??= out.ai.quotaMessage;
+        for (const n of out.notices) if (!notes.includes(n)) notes.push(n);
+        queue = queue.filter((c) => out.pending.includes(c.id));
+      }
+      if (signal?.aborted) return;
+      setLeadPreview((cur) => ({ ...cur, ...found }));
+      const list = Object.values(found);
+      setTried({
+        looked: list.length,
+        website: list.filter((r) => r.website).length,
+        person: list.filter((r) => r.people.length).length,
+        email: list.filter((r) => r.people.some((p) => p.email)).length,
+        linkedin: list.filter((r) => r.companyLinkedin || r.people.some((p) => p.linkedin)).length,
+        notes, // a 429 is shown in red in the AI box, not inside this success note
+      });
+      if (quota) setAi((a) => (a ? { ...a, ok: false, message: quota } : a));
+    } catch (e) {
+      if (signal?.aborted) return;
+      if (e instanceof LockedError) return setPhase("locked");
+      setTryError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTrying(null);
+    }
   }
 
   function saveCurrent(name: string) {
@@ -486,6 +579,7 @@ export default function Studio() {
   const hasItemCols = onCols.some((c) => c.item);
   const exportLabel =
     runMatches && run?.state === "done" ? `Download ${fmtN(rows.length)} rows` :
+    leadsOn ? (scope === "page" ? `Get ${fmtN(onPage)} rows + decision-makers` : scope === "feed" && feed?.total ? `Get all ${fmtN(feed.total)} + decision-makers` : "Get rows + decision-makers") :
     scope === "page" ? (hasItemCols ? `Get ${fmtN(onPage)} rows` : `Export ${fmtN(onPage)} rows`) :
     scope === "feed" ? (feed?.total ? `Get all ${fmtN(feed.total)} rows` : "Get every page") :
     "Capture pages and export";
@@ -561,10 +655,10 @@ export default function Studio() {
         <div className="work">
           <div className="deskcol">
             <Preview
-              columns={ws?.columns ?? []}
+              columns={ws ? [...ws.columns, ...leadColumns] : []}
               rows={rows}
               total={runMatches && run?.state === "done" ? rows.length : scope === "page" ? rows.length : expectedRows ?? rows.length}
-              label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : hasItemCols ? "this page; item-page columns fill in when you export" : scope === "page" ? "this page" : "this page, before fetching the rest"}
+              label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : hasItemCols ? "this page; item-page columns fill in when you export" : leadsOn ? "this page; decision-maker columns fill in when you export or try" : scope === "page" ? "this page" : "this page, before fetching the rest"}
               tableOnly={tableOnly}
               onToggleTableOnly={() => setTableOnly((v) => !v)}
               noListFound={noListFound}
@@ -631,6 +725,28 @@ export default function Studio() {
               )}
 
               {ws && (
+                <LeadsPanel
+                  config={leadsCfg}
+                  setConfig={(c) => setLeadsCfg({ ...c, listId: ws.listId })}
+                  columns={onNames}
+                  companies={expectedRows}
+                  findingPages={ws.items?.status === "looking"}
+                  hasPages={!!ws.items?.source}
+                  gated={!!cookie.trim()}
+                  ai={ai}
+                  aiError={aiError}
+                  testingAi={testingAi}
+                  onTestAi={() => void testAi()}
+                  trying={trying}
+                  tried={tried}
+                  tryError={tryError}
+                  onTry={() => void tryLeads()}
+                  run={runMatches && run?.job.leads ? run.job.leads : null}
+                  busy={!!busy}
+                />
+              )}
+
+              {ws && (
                 <section className="section">
                   <div className="section-head"><h2>How much</h2></div>
                   <ScopePicker scope={scope} setScope={setScope} onPage={onPage}
@@ -654,7 +770,7 @@ export default function Studio() {
                   <div className="progress" aria-live="polite">
                     <div className="ptext">
                       <span>{p.label}…</span>
-                      <span className="num">{fmtN(p.done)}{p.of ? ` / ${fmtN(p.of)}` : ""}{p.stage === "items" ? " pages" : " rows"}</span>
+                      <span className="num">{fmtN(p.done)}{p.of ? ` / ${fmtN(p.of)}` : ""}{p.stage === "items" ? " pages" : p.stage === "people" ? " companies" : " rows"}</span>
                     </div>
                     <div className={`meter${p.of ? "" : " indeterminate"}`}><i style={{ transform: `scaleX(${pct / 100})` }} /></div>
                     <button className="btn btn-quiet btn-block" onClick={() => jobAbort.current?.abort()}>Pause (progress is saved)</button>
@@ -732,7 +848,7 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop }: {
           <div className="jobrow" key={j.id}>
             <div style={{ minWidth: 0 }}>
               <b>Unfinished: {j.title}</b>
-              <span>{pr.stage === "items" ? `Item pages ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : `${fmtN(j.raw.length)} rows so far`} · {new Date(j.updatedAt).toLocaleString()}</span>
+              <span>{pr.stage === "items" ? `Item pages ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : pr.stage === "people" ? `Companies looked up ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : `${fmtN(j.raw.length)} rows so far`} · {new Date(j.updatedAt).toLocaleString()}</span>
             </div>
             <div style={{ display: "flex", gap: 4 }}>
               <button className="btn btn-quiet btn-sm" onClick={() => onResume(j)}><RotateCcw size={13} aria-hidden="true" />Resume</button>
@@ -743,4 +859,21 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop }: {
       })}
     </section>
   );
+}
+
+/** The config saved with a job (the UI-only listId is dropped). */
+function stripCfg(c: LeadsConfig & { listId?: string }): LeadsConfig {
+  const { listId: _l, ...rest } = c;
+  return rest;
+}
+
+/** " 812 of 1,000 companies have a named decision-maker…" for the finished-export message. */
+function leadSummary(job: Job): string {
+  const L = job.leads;
+  if (!L?.config.on) return "";
+  const all = Object.values(L.results);
+  const person = all.filter((r) => r.people.length).length;
+  const email = all.filter((r) => r.people.some((p) => p.email)).length;
+  const site = all.filter((r) => r.website).length;
+  return ` Decision-makers: ${fmtN(person)} of ${fmtN(all.length)} companies have a named person (${fmtN(email)} with a personal email), ${fmtN(site)} have a website.${L.quotaMessage ? ` ${L.quotaMessage}` : ""}`;
 }

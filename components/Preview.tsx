@@ -132,7 +132,12 @@ export default function Preview({
                     <td className="rn">{i + 1}</td>
                     {on.map((c) => {
                       const v = cell(r[c.name]);
-                      return <td key={c.id} className={v ? undefined : "empty"} title={v}>{v || "–"}</td>;
+                      const link = /^https?:\/\/\S+$/i.test(v);
+                      return (
+                        <td key={c.id} className={v ? undefined : "empty"} title={v}>
+                          {link ? <a className="cell-link" href={v} target="_blank" rel="noreferrer noopener">{v.replace(/^https?:\/\/(www\.)?/, "")}</a> : v || "–"}
+                        </td>
+                      );
                     })}
                   </tr>
                 ))}

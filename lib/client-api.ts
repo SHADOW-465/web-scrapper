@@ -173,3 +173,55 @@ export async function unlock(password: string): Promise<boolean> {
   const res = await fetch("/api/access", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }) });
   return res.ok;
 }
+
+/* ------------------------------------------------------------ decision-maker lookup */
+
+export interface LookupBatchOut {
+  results: import("./leads").LeadResult[];
+  pending: string[];
+  ai: { enabled: boolean; requests: number; tokens: number; searches: number; quotaMessage?: string };
+  notices: string[];
+}
+
+/** Look up a batch of companies (≤ 12). Companies not finished in the call's time come back in `pending`. */
+export async function lookupBatch(
+  body: { companies: import("./leads").CompanyRef[]; fairHost?: string; useAi: boolean; aiSearch: number },
+  signal?: AbortSignal,
+): Promise<LookupBatchOut> {
+  const res = await post("/api/people", body, signal);
+  const byId = new Map<string, import("./leads").LeadResult>();
+  let pending: string[] | null = null;
+  let ai: LookupBatchOut["ai"] = { enabled: false, requests: 0, tokens: 0, searches: 0 };
+  const notices: string[] = [];
+  let error: string | null = null;
+  await readNdjson(res, (e) => {
+    if (e.type === "company") {
+      const { type: _t, ...r } = e;
+      byId.set(String(r.id), r as unknown as import("./leads").LeadResult); // a later event for the same company replaces the earlier one
+    } else if (e.type === "ai") {
+      ai = { enabled: !!e.enabled, requests: Number(e.requests) || 0, tokens: Number(e.tokens) || 0, searches: Number(e.searches) || 0, quotaMessage: typeof e.quotaMessage === "string" ? e.quotaMessage : (e.quota as { message?: string } | undefined)?.message };
+    } else if (e.type === "notice") notices.push(String(e.message));
+    else if (e.type === "done") pending = ((e.pending as string[]) ?? []).map(String);
+    else if (e.type === "error") error = String(e.message);
+  });
+  if (error) throw new Error(error);
+  if (pending === null) throw new Error("The company lookup ended early. It will be retried.");
+  return { results: [...byId.values()], pending, ai, notices };
+}
+
+export interface AiStatus {
+  enabled: boolean;
+  ok?: boolean;
+  ms?: number;
+  models?: string[];
+  message?: string;
+  quota?: { scope: "day" | "minute"; resetInSeconds: number };
+  limits?: Record<string, { remainingRequests?: number; remainingTokens?: number; resetRequests?: string; resetTokens?: string }>;
+}
+
+/** Is AI configured on the server? `test` makes one tiny Groq request to prove it works. */
+export async function aiStatus(test = false): Promise<AiStatus> {
+  const res = test ? await post("/api/ai-status", {}) : await fetch("/api/ai-status", { cache: "no-store" });
+  if (res.status === 401) throw new LockedError("locked");
+  return (await res.json()) as AiStatus;
+}

@@ -50,6 +50,13 @@ export function isObviouslyInternal(hostname: string): boolean {
 
 const cache = new Map<string, Promise<boolean>>();
 
+/**
+ * Local testing behind an egress proxy that resolves names itself (no local DNS).
+ * Only with SS_DEV_PROXY=1 and never in production: an unresolvable public name
+ * is then allowed, because the proxy, not this machine, will connect to it.
+ */
+export const devProxy = () => process.env.NODE_ENV !== "production" && process.env.SS_DEV_PROXY === "1" && !process.env.VERCEL;
+
 /** True when every address the hostname resolves to is public. */
 export function resolvesPublic(hostname: string): Promise<boolean> {
   const host = hostname.replace(/^\[|\]$/g, "");
@@ -59,7 +66,7 @@ export function resolvesPublic(hostname: string): Promise<boolean> {
   if (!p) {
     p = lookup(host, { all: true })
       .then((addrs) => addrs.length > 0 && addrs.every((a) => !isPrivateIp(a.address)))
-      .catch(() => false);
+      .catch(() => devProxy());
     cache.set(host, p);
     if (cache.size > 2000) cache.clear();
   }
