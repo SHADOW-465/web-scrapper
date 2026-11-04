@@ -633,3 +633,21 @@ table.grid td.empty { color: var(--rule-strong); }
 .signin form { display: grid; gap: 6px; margin-top: 10px; }
 .signin form label { font-size: 12.5px; font-weight: 600; color: var(--graphite-2); }
 .signin form p { margin: 4px 0; font-size: 12.5px; color: var(--graphite-3); line-height: 1.45; }
+
+/* AI usage bar */
+.aibar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 22px; font-size: 12.5px; color: var(--graphite-2); background: var(--chrome); border-bottom: 1px solid var(--rule); }
+.aibar b { color: var(--graphite); }
+.aibar code { font-size: 11.5px; background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; padding: 0 4px; }
+.aimeter { width: 140px; height: 8px; border-radius: 6px; background: var(--paper); border: 1px solid var(--rule-strong); overflow: hidden; flex: none; }
+.aimeter i { display: block; height: 100%; background: var(--ok); transition: width 400ms var(--ease-out); }
+.aibar.warn .aimeter i { background: #d99a1a; }
+.aibar.err { color: var(--danger); background: #fdf0ef; }
+.aibar.err .aimeter i { background: var(--danger); }
+.aibar-note { margin-left: auto; font-size: 11.5px; color: var(--graphite-3); }
+.aibar.off { color: var(--graphite-3); }
+@media (max-width: 640px) { .aibar { padding: 5px 16px; } .aimeter { width: 90px; } .aibar-note { display: none; } }
+
+/* table pager */
+.pager { position: sticky; bottom: 0; left: 0; display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-top: 1px solid var(--rule); background: var(--paper); font-size: 12.5px; color: var(--graphite-2); }
+.pager .pageinfo { padding: 0 6px; }
+.pager .btn { gap: 2px; }

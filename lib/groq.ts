@@ -36,7 +36,14 @@ export class AiError extends Error {
 
 /* ------------------------------------------------------------ state (per server instance) */
 
-export interface Limits { remainingRequests?: number; remainingTokens?: number; resetRequests?: string; resetTokens?: string; at: number }
+/**
+ * Groq's rate-limit headers: "requests" are per day (RPD), "tokens" per minute (TPM).
+ * Daily tokens (TPD) are not in the headers; a daily 429 says "Limit N, Used M", kept as dayTokens*.
+ */
+export interface Limits {
+  remainingRequests?: number; limitRequests?: number; remainingTokens?: number; limitTokens?: number;
+  resetRequests?: string; resetTokens?: string; dayTokensUsed?: number; dayTokensLimit?: number; at: number;
+}
 const limits = new Map<string, Limits>();
 const num = (v: string | null) => (v != null && v !== "" && !Number.isNaN(Number(v)) ? Number(v) : undefined);
 /** The latest rate-limit headers Groq sent, per model (this server instance only). */
@@ -49,7 +56,7 @@ let notice: AiQuotaError | null = null;
 
 /** Counters since the last call; routes emit them as an `ai` event. */
 export function takeUsage() {
-  const out = { ...usage, quota: notice ? { scope: notice.scope, resetInSeconds: notice.resetInSeconds, message: notice.message } : undefined };
+  const out = { ...usage, quota: notice ? { scope: notice.scope, resetInSeconds: notice.resetInSeconds, message: notice.message } : undefined, limits: latestLimits(), models: models() };
   usage.requests = usage.tokens = usage.cached = 0;
   return out;
 }
@@ -128,9 +135,13 @@ async function call(model: string, system: string, user: string, maxTokens: numb
     return { ok: false, kind: "error", message: `Could not reach Groq: ${scrub(e instanceof Error ? e.message : e, [key])}` };
   }
   usage.requests++;
+  const before = limits.get(model);
   limits.set(model, {
+    ...(before?.dayTokensUsed != null && Date.now() - before.at < 6 * 3600_000 ? { dayTokensUsed: before.dayTokensUsed, dayTokensLimit: before.dayTokensLimit } : {}),
     remainingRequests: num(res.headers.get("x-ratelimit-remaining-requests")),
+    limitRequests: num(res.headers.get("x-ratelimit-limit-requests")),
     remainingTokens: num(res.headers.get("x-ratelimit-remaining-tokens")),
+    limitTokens: num(res.headers.get("x-ratelimit-limit-tokens")),
     resetRequests: res.headers.get("x-ratelimit-reset-requests") ?? undefined,
     resetTokens: res.headers.get("x-ratelimit-reset-tokens") ?? undefined,
     at: Date.now(),
@@ -139,6 +150,12 @@ async function call(model: string, system: string, user: string, maxTokens: numb
     const text = await res.text().catch(() => "");
     const retry = parseDuration(res.headers.get("retry-after")) ?? parseDuration(res.headers.get("x-ratelimit-reset-requests")) ?? parseDuration(res.headers.get("x-ratelimit-reset-tokens")) ?? 30;
     const daily = /per day|\bTPD\b|\bRPD\b/i.test(text) || retry > 3600;
+    // "on tokens per day (TPD): Limit 200000, Used 199980" -> the day's real usage.
+    const used = text.match(/Limit\s+(\d+),\s*Used\s+(\d+)/i);
+    if (used && /per day|TPD/i.test(text)) {
+      const cur = limits.get(model);
+      if (cur) limits.set(model, { ...cur, dayTokensLimit: Number(used[1]), dayTokensUsed: Number(used[2]) });
+    }
     return { ok: false, kind: "quota", scope: daily ? "day" : "minute", wait: retry };
   }
   if (res.status === 400 && withReasoning) {

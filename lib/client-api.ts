@@ -1,4 +1,5 @@
 /** Browser-side calls to the streaming endpoints. */
+import { noteAi } from "./ai-usage";
 import { readNdjson } from "./ndjson";
 import type { ItemResult, ItemSpec } from "./items-client";
 import type { Feed, ItemCatalogue, ItemSource, Row } from "./model";
@@ -61,6 +62,7 @@ export async function scanPage(
   await readNdjson(res, (e) => {
     if (e.type === "status") onStatus(String(e.text));
     else if (e.type === "session") onSession?.(String(e.session));
+    else if (e.type === "ai") noteAi(e);
     else if (e.type === "result") result = e as unknown as ScanResult;
     else if (e.type === "error") error = new ScanError(String(e.message), e.kind === "site" ? "site" : "server");
   });
@@ -144,6 +146,7 @@ export async function sampleItems(
     if (e.type === "status") onStatus(String(e.text));
     else if (e.type === "result") out = { pattern: (e.pattern as ItemSource | null) ?? null, catalogue: e.catalogue as ItemCatalogue };
     else if (e.type === "none" && e.message) reason = String(e.message);
+    else if (e.type === "ai") noteAi(e);
     else if (e.type === "error") error = String(e.message);
   });
   if (error) throw new Error(error);
@@ -190,7 +193,7 @@ export async function unlock(password: string): Promise<boolean> {
 export interface LookupBatchOut {
   results: import("./leads").LeadResult[];
   pending: string[];
-  ai: { enabled: boolean; requests: number; tokens: number; searches: number; quotaMessage?: string };
+  ai: { enabled: boolean; requests: number; tokens: number; searches: number; quotaMessage?: string; quotaScope?: "day" | "minute" };
   notices: string[];
 }
 
@@ -210,7 +213,8 @@ export async function lookupBatch(
       const { type: _t, ...r } = e;
       byId.set(String(r.id), r as unknown as import("./leads").LeadResult); // a later event for the same company replaces the earlier one
     } else if (e.type === "ai") {
-      ai = { enabled: !!e.enabled, requests: Number(e.requests) || 0, tokens: Number(e.tokens) || 0, searches: Number(e.searches) || 0, quotaMessage: typeof e.quotaMessage === "string" ? e.quotaMessage : (e.quota as { message?: string } | undefined)?.message };
+      noteAi(e);
+      ai = { enabled: !!e.enabled, requests: Number(e.requests) || 0, tokens: Number(e.tokens) || 0, searches: Number(e.searches) || 0, quotaMessage: typeof e.quotaMessage === "string" ? e.quotaMessage : (e.quota as { message?: string } | undefined)?.message, quotaScope: (e.quotaScope ?? (e.quota as { scope?: string } | undefined)?.scope) as "day" | "minute" | undefined };
     } else if (e.type === "notice") notices.push(String(e.message));
     else if (e.type === "done") pending = ((e.pending as string[]) ?? []).map(String);
     else if (e.type === "error") error = String(e.message);
@@ -234,7 +238,9 @@ export interface AiStatus {
 export async function aiStatus(test = false): Promise<AiStatus> {
   const res = test ? await post("/api/ai-status", {}) : await fetch("/api/ai-status", { cache: "no-store" });
   if (res.status === 401) throw new LockedError("locked");
-  return (await res.json()) as AiStatus;
+  const out = (await res.json()) as AiStatus & { usage?: Record<string, unknown> };
+  if (test) noteAi(out.usage ?? { limits: out.limits, models: out.models, quota: out.quota ? { ...out.quota, message: out.message } : undefined });
+  return out;
 }
 
 /* ------------------------------------------------------------ plain-words request -> plan */
@@ -248,7 +254,9 @@ export async function planWithAi(
 ): Promise<PlanAnswer> {
   try {
     const res = await post("/api/plan", body, signal);
-    return (await res.json()) as PlanAnswer;
+    const out = (await res.json()) as PlanAnswer & { usage?: Record<string, unknown>; quotaScope?: string };
+    noteAi(out.usage ?? (out.reason === "quota" ? { quotaMessage: out.message, quotaScope: out.quotaScope } : undefined));
+    return out;
   } catch (e) {
     if (e instanceof LockedError || signal?.aborted) throw e;
     return { ai: null, reason: "error", message: e instanceof Error ? e.message : String(e) };

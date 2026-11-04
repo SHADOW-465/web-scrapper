@@ -18,9 +18,10 @@ import * as leads from "../lib/leads";
 import * as wishes from "../lib/wishes";
 import * as login from "../lib/login";
 import * as session from "../lib/session";
+import * as aiUsage from "../lib/ai-usage";
 
 let failed = 0;
-for (const [name, mod] of Object.entries({ records, ssrf, token, replay, correlate, exporters, model, items, itemsClient, snapshot, redact, roles, people, leads, wishes, login, session })) {
+for (const [name, mod] of Object.entries({ records, ssrf, token, replay, correlate, exporters, model, items, itemsClient, snapshot, redact, roles, people, leads, wishes, login, session, aiUsage })) {
   try {
     console.log("pass ", (mod as { selfCheck: () => string }).selfCheck());
   } catch (e) {

@@ -47,7 +47,7 @@ export async function POST(req: Request) {
     const ai = await groqJson<Record<string, unknown>>("plan", SYSTEM, user, { maxTokens: 1500 });
     return Response.json({ ai, usage: takeUsage() }, { headers: { "cache-control": "no-store" } });
   } catch (e) {
-    if (e instanceof AiQuotaError) return Response.json({ ai: null, reason: "quota", message: e.message });
+    if (e instanceof AiQuotaError) return Response.json({ ai: null, reason: "quota", message: e.message, quotaScope: e.scope, usage: { ...takeUsage(), quotaScope: e.scope, quotaMessage: e.message } });
     return Response.json({ ai: null, reason: "error", message: safeMessage(e) });
   }
 }

@@ -33,6 +33,8 @@ export interface JobInput {
   plan?: Plan;
   /** Stop fetching rows once this many are in (a limit with no filter needs no more). */
   stopAfter?: number;
+  /** Rows stopped early at stopAfter: a later job without that limit must fetch the rest. */
+  rowsCut?: boolean;
 }
 
 export interface Job extends JobInput {
@@ -255,6 +257,7 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           report();
           if (chunk.next == null) break;
           if (job.stopAfter && job.raw.length >= job.stopAfter) {
+            job.rowsCut = true;
             job.note = job.plan?.limit
               ? `Only the first ${job.raw.length.toLocaleString()} rows were fetched: enough for the ${job.plan.limit.toLocaleString()} you asked for.`
               : `Stopped after ${job.raw.length.toLocaleString()} rows.`;
@@ -314,12 +317,13 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
         fairHost = undefined;
       }
       const queue = companies.filter((c) => !L.results[c.id]);
-      const lanes = 2;
+      const lanes = 3; // 3 calls at once, 6 companies each: ~18 companies in flight
       await Promise.all(Array.from({ length: lanes }, async () => {
         while (queue.length) {
           const batch = queue.splice(0, 12);
           // Reserve this batch's share of the run's AI web-search budget up front (two lanes share it).
-          const grant = L.quotaMessage ? 0 : Math.max(0, Math.min(3, L.config.aiSearch - L.aiSearchesUsed));
+          // At most 2 searches per call: one search is ~5K tokens and the free tier allows 8K tokens per minute per model.
+          const grant = L.quotaMessage ? 0 : Math.max(0, Math.min(2, L.config.aiSearch - L.aiSearchesUsed));
           L.aiSearchesUsed += grant;
           status = "";
           let out;
@@ -333,7 +337,8 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           L.aiSearchesUsed -= grant - Math.min(grant, out.ai.searches);
           L.aiRequests += out.ai.requests;
           L.aiTokens += out.ai.tokens;
-          if (out.ai.quotaMessage) L.quotaMessage = out.ai.quotaMessage; // shown to the user; AI is not used again this run
+          // A daily limit stops AI for the rest of the run (and is shown); a per-minute one only skips this batch.
+          if (out.ai.quotaMessage && out.ai.quotaScope !== "minute") L.quotaMessage = out.ai.quotaMessage;
           for (const n of out.notices) if (!L.notices.includes(n) && L.notices.length < 5) L.notices.push(n);
           for (const r of out.results) L.results[r.id] = r;
           for (const id of out.pending) {
@@ -385,4 +390,18 @@ export function progressOf(job: Job, status = ""): Progress {
 
 export function failedItems(job: Job): string[] {
   return itemUrls(job).filter((u) => job.results[u] && !job.results[u].ok);
+}
+
+/**
+ * Start a new job from what an earlier job of the same dataset already has: fetched rows
+ * (continuing where it stopped), item pages read, and companies looked up. A changed request
+ * then costs no re-fetching.
+ */
+export function carryOver(job: Job, prior: Job | undefined): Job {
+  if (!prior || prior.scanUrl !== job.scanUrl || prior.ws.listId !== job.ws.listId || prior.scope !== job.scope || job.scope !== "feed") return job;
+  const rowsDone = prior.stage !== "rows" && !(prior.rowsCut && (!job.stopAfter || (prior.stopAfter ?? 0) < job.stopAfter));
+  const next: Job = { ...job, raw: [...prior.raw], nextIndex: prior.nextIndex, total: prior.total, pages: prior.pages, results: { ...prior.results } };
+  if (rowsDone) next.stage = specFor(next.ws) ? "items" : next.leads?.config.on ? "people" : "done";
+  if (next.leads && prior.leads) next.leads = { ...next.leads, results: { ...prior.leads.results, ...next.leads.results } };
+  return next;
 }

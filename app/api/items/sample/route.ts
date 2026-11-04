@@ -1,5 +1,6 @@
 import { denied, hasAccess } from "@/lib/access";
 import { discoverPattern, HeavyPagesError, sampleItemPage } from "@/lib/items";
+import { takeUsage } from "@/lib/groq";
 import { ndjson } from "@/lib/ndjson";
 import { cookieFrom, SessionError } from "@/lib/session";
 import { assertPublicUrl } from "@/lib/ssrf";
@@ -72,6 +73,7 @@ export async function POST(req: Request) {
     emit({ type: "status", text: "Reading one item's page" });
     try {
       const catalogue = await sampleItemPage(urls, cookieFor(urls[0]));
+      emit({ type: "ai", ...takeUsage() });
       emit({ type: "result", pattern, catalogue });
     } catch (e) {
       if (e instanceof HeavyPagesError) emit({ type: "none", message: e.message });

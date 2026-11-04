@@ -5,14 +5,16 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { aiStatus, fetchChunk, LockedError, lookupBatch, planWithAi, sampleItems, scanPage, ScanError, SkippedItemsError, unlock, type AiStatus, type CrawlRequest, type ScanResult } from "@/lib/client-api";
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
 import { discoveryRequest, fillPattern, findItemSource, sourceFromPastedUrl, specFor, spread, widerRows } from "@/lib/items-client";
-import { baseRows, deleteJob, exportFields, failedItems, finalRows, leadNames, loadJobs, newJob, planOutput, progressOf, runJob, type Job, type Progress } from "@/lib/job";
+import { baseRows, carryOver, deleteJob, exportFields, failedItems, finalRows, leadNames, loadJobs, newJob, planOutput, progressOf, runJob, type Job, type Progress } from "@/lib/job";
 import { availableFrom, describeSource, followUp, fromAi, needsLookup, parseRequest, planFilter, planHeaders, resolvePlan, urlIn, type Plan } from "@/lib/wishes";
 import { companiesFrom, guessLeadColumns, joinLeads, newLeadsState, type LeadResult, type LeadsConfig } from "@/lib/leads";
-import { extraFields, findDirectoryLinksInHtml, listRowCount, looksLikeNavigation, matchList, pageOnly, visiblePageRows, type Column, type DirectoryLink, type ItemSource, type Row, type Workspace } from "@/lib/model";
+import { extraFields, feedRows, findDirectoryLinksInHtml, listRowCount, looksLikeNavigation, matchList, pageOnly, visiblePageRows, type Column, type DirectoryLink, type ItemSource, type Row, type Workspace } from "@/lib/model";
 import { deleteRecipe, loadRecipes, saveRecipe, type Recipe } from "@/lib/recipes";
 import { initial, reducer } from "@/lib/studio-state";
 import { Failed, Locked, Printing } from "./Blank";
+import AiUsageBar from "./AiUsageBar";
 import { ChatHome, ChatPanel, type ChatMsg } from "./Chat";
+import { affordableSearches, readAiDay } from "@/lib/ai-usage";
 import { LeadsPanel, type TrySummary } from "./Leads";
 import Mark from "./Mark";
 import Preview from "./Preview";
@@ -89,6 +91,9 @@ export default function Studio() {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [planning, setPlanning] = useState(false);
   const [trialWanted, setTrialWanted] = useState(false);
+  const [autoRun, setAutoRun] = useState(false);
+  // Rows of the site's data loaded for browsing the table before an export (Next page).
+  const [browse, setBrowse] = useState<{ id: string; raw: Row[]; next: number | null; error?: string } | null>(null);
   const pendingAsk = useRef<string | null>(null);
   const scanMsg = useRef<string | null>(null);
   const runMsg = useRef<string | null>(null);
@@ -234,6 +239,7 @@ export default function Studio() {
   const ws = st.active ? st.ws[st.active] : undefined;
   const activeList = st.lists.find((l) => l.id === st.active);
   const feed = ws?.feedId ? st.feeds.find((f) => f.id === ws.feedId) : undefined;
+  const browseId = `${scan?.finalUrl ?? ""}|${feed?.id ?? ""}`;
   const directoryLinks = useMemo<DirectoryLink[]>(() => {
     const out: DirectoryLink[] = [];
     const seenUrls = new Set<string>();
@@ -303,7 +309,7 @@ export default function Studio() {
       const g = guessLeadColumns(ws.columns, pageRowList);
       if (!g) return cur ? { ...cur, on: false } : null;
       // Off until a request asks for decision-makers (or she ticks it): most lists are not company directories.
-      return { on: cur?.listId === ws.listId ? cur.on : false, ...g, limit: cur?.limit ?? null, aiSearch: cur?.aiSearch ?? 10, listId: ws.listId };
+      return { on: cur?.listId === ws.listId ? cur.on : false, ...g, limit: cur?.limit ?? null, aiSearch: cur?.aiSearch ?? -1, listId: ws.listId };
     });
   }, [ws?.listId, onNames.join("\u0000"), pageRowList.length]); // eslint-disable-line react-hooks/exhaustive-deps
   const leadsOn = !!leadsCfg?.on && !!ws && onNames.includes(leadsCfg.nameCol);
@@ -436,6 +442,17 @@ export default function Studio() {
     else addMsg({ role: "assistant", text: "What do you need in the export? For example: company, country, CEO name, email, LinkedIn, booth number." });
   }, [pageSettled]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A request read: start the full run (every row, every company), once each company's page on the site is known.
+  useEffect(() => {
+    if (!autoRun || !plan || !ws || ws.items?.status === "looking") return;
+    setAutoRun(false);
+    if (runMsg.current) {
+      updateMsg(runMsg.current, { busy: false, progress: undefined, actions: [], text: "Restarted with your changed request (rows and lookups so far are kept)." });
+      runMsg.current = null;
+    }
+    void startExport(format, { download: false });
+  }, [autoRun, plan, ws?.items?.status, leadsCfg]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // The trial: 5 companies, once each company's page on the site is known.
   useEffect(() => {
     if (!trialWanted || !leadsOn || trying || ws?.items?.status === "looking") return;
@@ -463,9 +480,18 @@ export default function Studio() {
     const p = run.progress;
     const unit = p.stage === "items" ? "pages" : p.stage === "people" ? "companies" : "rows";
     if (run.state === "running") {
-      const text = `${p.label}: ${fmtN(p.done)}${p.of ? ` of ${fmtN(p.of)}` : ""} ${unit}`;
-      if (!runMsg.current) runMsg.current = addMsg({ role: "assistant", text, busy: true, progress: { done: p.done, of: p.of } });
-      else updateMsg(runMsg.current, { text, progress: { done: p.done, of: p.of } });
+      const L = run.job.leads;
+      const found = L ? Object.values(L.results) : [];
+      const people = found.filter((r) => r.people.length).length;
+      const sites = found.filter((r) => r.website).length;
+      const text = [
+        `${p.label}: ${fmtN(p.done)}${p.of ? ` of ${fmtN(p.of)}` : ""} ${unit}`,
+        found.length ? `So far: ${fmtN(sites)} websites, ${fmtN(people)} companies with a named decision-maker.` : "",
+        L?.quotaMessage ?? "",
+      ].filter(Boolean).join("\n");
+      const actions = [{ id: "ready-xlsx", label: "Download what's ready (Excel)" }, { id: "ready-csv", label: "CSV" }, { id: "pause", label: "Pause" }];
+      if (!runMsg.current) runMsg.current = addMsg({ role: "assistant", text, busy: true, progress: { done: p.done, of: p.of }, actions });
+      else updateMsg(runMsg.current, { text, progress: { done: p.done, of: p.of }, actions });
     } else if (runMsg.current) {
       const id = runMsg.current;
       runMsg.current = null;
@@ -487,13 +513,29 @@ export default function Studio() {
   const rows: Row[] = useMemo(() => {
     if (!ws) return [];
     if (runMatches && run) return finalRows({ ...run.job, ws });
-    // Before an export: this page's rows, with any trial lookups joined in.
+    // Before an export: this page's rows plus any pages loaded with Next, with trial lookups joined in.
+    const more = browse && browse.id === browseId && feed ? feedRows(ws, activeList, browse.raw) : [];
+    const all = more.length ? [...pageRowList, ...more] : pageRowList;
     if (plan && scan) {
       const L = leadsOn && leadsCfg ? { ...newLeadsState(stripCfg(leadsCfg)), results: leadPreview } : undefined;
-      return planOutput({ plan, leads: L, ws, scanUrl: scan.finalUrl }, pageRowList);
+      return planOutput({ plan, leads: L, ws, scanUrl: scan.finalUrl }, all);
     }
-    return leadsOn && leadsCfg ? joinLeads(pageRowList, leadsCfg, leadPreview, leadNames({ ws })) : pageRowList;
-  }, [ws, pageRowList, run, runMatches, leadsOn, leadsCfg, leadPreview, plan, scan]);
+    return leadsOn && leadsCfg ? joinLeads(all, leadsCfg, leadPreview, leadNames({ ws })) : all;
+  }, [ws, pageRowList, run, runMatches, leadsOn, leadsCfg, leadPreview, plan, scan, browse, browseId, feed, activeList]);
+
+  const loadedRaw = feed ? feed.rows.length + (browse && browse.id === browseId ? browse.raw.length : 0) : 0;
+  const canLoadMore = !runMatches && !!feed?.token && !!feed.paginated && (browse?.id !== browseId || browse.next !== null) && (feed.total == null || loadedRaw < feed.total);
+  async function loadMore() {
+    if (!feed?.token) return;
+    const cur = browse && browse.id === browseId ? browse : { id: browseId, raw: [] as Row[], next: 1 as number | null };
+    if (cur.next === null) return;
+    try {
+      const chunk = await fetchChunk(feed.token, cur.next, abort.current?.signal, 100);
+      setBrowse({ id: browseId, raw: [...cur.raw, ...chunk.rows], next: chunk.next, error: chunk.error });
+    } catch (e) {
+      setBrowse({ ...cur, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
   const planColumns: Column[] = useMemo(
     () => (plan ? planHeaders(plan).map((name) => ({ id: `plan:${name}`, name, ink: / \((source|confidence)\)$/.test(name) ? "#e8e3d4" : "#f7e733", on: true, sample: "" })) : []),
     [plan],
@@ -524,7 +566,7 @@ export default function Studio() {
     return { count: out.length, filename };
   }
 
-  async function execute(job: Job) {
+  async function execute(job: Job, opts: { download?: boolean } = {}) {
     jobAbort.current?.abort();
     const ac = new AbortController();
     jobAbort.current = ac;
@@ -536,11 +578,13 @@ export default function Studio() {
         onUpdate: (j, p) => { if (jobAbort.current === ac) setRun({ job: j, progress: p, state: "running" }); },
       });
       if (ac.signal.aborted || jobAbort.current !== ac) return;
-      const { count, filename } = await deliver(done);
+      // Runs started from the chat finish with download buttons instead of a surprise download.
+      const saved = opts.download === false ? null : await deliver(done);
+      const count = saved?.count ?? finalRows(done).length;
       const failed = failedItems(done).length;
       setRun({
         job: done, progress: progressOf(done), state: "done",
-        message: `${fmtN(count)} rows saved to ${filename}.${failed ? ` ${fmtN(failed)} item pages couldn't be read; their columns are empty.` : ""}${done.note ? ` ${done.note}` : ""}${leadSummary(done)}`,
+        message: `${saved ? `${fmtN(count)} rows saved to ${saved.filename}.` : `Done: ${fmtN(count)} rows are ready.`}${failed ? ` ${fmtN(failed)} item pages couldn't be read; their columns are empty.` : ""}${done.note ? ` ${done.note}` : ""}${leadSummary(done)}`,
       });
       await deleteJob(done.id);
     } catch (e) {
@@ -557,7 +601,7 @@ export default function Studio() {
     }
   }
 
-  async function startExport(fmt: Format = format) {
+  async function startExport(fmt: Format = format, opts: { download?: boolean } = {}) {
     if (!ws || !scan) return;
     if (!onCols.length) return say("Switch on at least one column first.");
     const format = fmt;
@@ -596,14 +640,19 @@ export default function Studio() {
         },
       };
     }
-    await execute(newJob({
+    // AI web searches: "automatic" means as many as today's free Groq tokens allow.
+    const cfg = leadsOn && leadsCfg ? stripCfg(leadsCfg) : null;
+    if (cfg && cfg.aiSearch < 0) cfg.aiSearch = ai?.enabled ? affordableSearches(readAiDay(), ai.models?.length) : 0;
+    const job = newJob({
       title, format, scanUrl: scan.finalUrl, scope, ws, list: activeList, feed, crawl, gated: signedIn,
       // Companies already looked up in a trial run are not looked up again.
-      leads: leadsOn && leadsCfg ? newLeadsState(stripCfg(leadsCfg), leadPreview) : undefined,
+      leads: cfg ? newLeadsState(cfg, leadPreview) : undefined,
       plan: plan ?? undefined,
       // A limit without a country filter needs only the first pages (a little extra for repeated names).
       stopAfter: plan?.limit && !plan.country && scope === "feed" ? Math.ceil(plan.limit * 1.2) + 40 : undefined,
-    }));
+    });
+    // A changed request reuses the rows and lookups the last run already has.
+    await execute(carryOver(job, run?.job), opts);
   }
 
   async function testAi() {
@@ -640,7 +689,7 @@ export default function Studio() {
       let quota: string | undefined;
       const notes: string[] = [];
       for (let pass = 0; pass < 2 && queue.length; pass++) {
-        const out = await lookupBatch({ companies: queue, fairHost: new URL(scan.finalUrl).hostname, useAi: true, aiSearch: Math.min(2, leadsCfg.aiSearch) }, signal);
+        const out = await lookupBatch({ companies: queue, fairHost: new URL(scan.finalUrl).hostname, useAi: true, aiSearch: leadsCfg.aiSearch < 0 ? 2 : Math.min(2, leadsCfg.aiSearch) }, signal);
         for (const r of out.results) found[r.id] = r;
         quota ??= out.ai.quotaMessage;
         for (const n of out.notices) if (!notes.includes(n)) notes.push(n);
@@ -751,17 +800,19 @@ export default function Studio() {
       `Here's your export: ${next.items.length} column${next.items.length === 1 ? "" : "s"}${next.sources ? ", each with its source and confidence" : ""}.`,
       next.country || next.limit ? `Only ${[next.country ? `companies from ${next.country}` : "", next.limit ? `the first ${next.limit}` : ""].filter(Boolean).join(", ")}.` : "",
       next.unresolved.length ? `Not available on this site: ${next.unresolved.join(", ")}.` : "",
-      lookup ? `I'll look up each company's decision-makers on its fair page and its own website. Trying the first 5 now…` : "",
+      lookup
+        ? `Looking up every company now${next.limit ? ` (the first ${fmtN(next.limit)})` : ""}: its page on this site, then its own website (imprint, team, contact). Results fill the table as they come in; you can download what's ready at any time.`
+        : "Fetching every row now; the table fills as it goes.",
       how,
     ].filter(Boolean);
     updateMsg(thinking, {
       busy: false,
       text: lines.join("\n"),
       chips: next.items.map((i) => ({ label: i.label, hint: describeSource(i.source) })),
-      actions: lookup ? [] : exportActions(next, total),
+      actions: [],
     });
     setPlanning(false);
-    if (lookup) setTrialWanted(true);
+    setAutoRun(true);
   }
 
   /** Switch on the columns the plan reads, and set the decision-maker lookup to match. */
@@ -788,7 +839,7 @@ export default function Studio() {
     const company = next.companyColId ? ws.columns.find((c) => c.id === next.companyColId) : undefined;
     const country = next.countryColId ? ws.columns.find((c) => c.id === next.countryColId) : undefined;
     if (needsLookup(next) && company) {
-      setLeadsCfg((cur) => ({ on: true, nameCol: company.name, countryCol: country?.name, websiteCol: cur?.websiteCol, limit: next.limit, aiSearch: cur?.aiSearch ?? 10, listId: ws.listId }));
+      setLeadsCfg((cur) => ({ on: true, nameCol: company.name, countryCol: country?.name, websiteCol: cur?.websiteCol, limit: next.limit, aiSearch: cur?.aiSearch ?? -1, listId: ws.listId }));
     } else setLeadsCfg((cur) => (cur ? { ...cur, on: false } : cur));
     setPlan(next);
     setDoneNote(null);
@@ -805,9 +856,13 @@ export default function Studio() {
   function onChatAction(id: string) {
     if (id === "export-xlsx" || id === "download-xlsx") { setFormat("xlsx"); runMsg.current = null; void startExport("xlsx"); }
     else if (id === "export-csv" || id === "download-csv") { setFormat("csv"); runMsg.current = null; void startExport("csv"); }
+    else if ((id === "ready-xlsx" || id === "ready-csv") && run && ws) {
+      void deliver({ ...run.job, ws, format: id === "ready-xlsx" ? "xlsx" : "csv" }).then(({ count, filename }) => say(`${fmtN(count)} rows so far saved to ${filename}`));
+    }
+    else if (id === "pause") jobAbort.current?.abort();
     else if (id === "try") setTrialWanted(true);
     else if (id === "retry-scan") void startScan(url);
-    else if (id === "resume" && run) void execute(run.job);
+    else if (id === "resume" && run) void execute(run.job, { download: false });
   }
 
   function saveCurrent(name: string) {
@@ -946,6 +1001,7 @@ export default function Studio() {
           </div>
         )}
       </header>
+      <AiUsageBar enabled={ai ? ai.enabled : null} models={ai?.models} />
 
       {(phase === "idle" || (chat.length > 0 && (phase === "scanning" || phase === "error"))) && (
         <ChatHome messages={chat} onSend={onChatSend} onAction={onChatAction} busy={phase === "scanning" || planning}>
@@ -963,13 +1019,16 @@ export default function Studio() {
               columns={plan ? planColumns : ws ? [...ws.columns, ...leadColumns] : []}
               rows={rows}
               total={runMatches && run?.state === "done" ? rows.length : plan ? (plan.limit ?? (plan.country ? rows.length : expectedRows ?? rows.length)) : scope === "page" ? rows.length : expectedRows ?? rows.length}
-              label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : plan ? (needsLookup(plan) ? "this page; decision-maker columns fill in for tried companies and when you export" : "this page, as your export will look") : hasItemCols ? "this page; item-page columns fill in when you export" : leadsOn ? "this page; decision-maker columns fill in when you export or try" : scope === "page" ? "this page" : "this page, before fetching the rest"}
+              label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : plan ? (needsLookup(plan) ? "this page; decision-maker columns fill in for tried companies and when you export" : "this page, as your export will look") : hasItemCols ? "this page; item-page columns fill in when you export" : leadsOn ? "this page; decision-maker columns fill in when you export or try" : scope === "page" ? "this page" : loadedRaw > (feed?.rows.length ?? 0) ? "browsing the site's data; the export fetches everything" : "this page, before fetching the rest"}
               tableOnly={tableOnly}
               onToggleTableOnly={() => setTableOnly((v) => !v)}
               noListFound={noListFound}
               isNavigation={isNavigation}
               directoryLinks={directoryLinks}
               onFollowLink={followDirectoryLink}
+              canLoadMore={canLoadMore}
+              onLoadMore={loadMore}
+              loadError={browse && browse.id === browseId ? browse.error ?? null : null}
             />
             <div className={`sheetbar${tableOnly ? " collapsed" : ""}`}>
               <span className="host">{hostOf(scan.finalUrl)}</span>

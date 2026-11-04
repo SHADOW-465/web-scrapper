@@ -105,11 +105,16 @@ export function LeadsPanel(props: {
             )}
             {ai?.enabled && (
               <div className="leadgrid">
-                <label htmlFor="lead-ai">AI web searches</label>
+                <label htmlFor="lead-ai-auto">AI web searches</label>
                 <div className="limitrow">
-                  <input id="lead-ai" type="number" min={0} max={200} value={cfg.aiSearch}
-                    onChange={(e) => set({ aiSearch: Math.max(0, Math.min(200, Math.floor(Number(e.target.value) || 0))) })} />
-                  <small>per run, only for companies whose website isn&rsquo;t listed and can&rsquo;t be matched by name</small>
+                  <label className="limitrow" style={{ gap: 6 }}>
+                    <input id="lead-ai-auto" type="checkbox" checked={cfg.aiSearch < 0} onChange={(e) => set({ aiSearch: e.target.checked ? -1 : 10 })} />
+                    <small>Automatic: as many as today&rsquo;s free limit allows</small>
+                  </label>
+                  {cfg.aiSearch >= 0 && (
+                    <input id="lead-ai" type="number" min={0} max={500} value={cfg.aiSearch} aria-label="AI web searches per run"
+                      onChange={(e) => set({ aiSearch: Math.max(0, Math.min(500, Math.floor(Number(e.target.value) || 0))) })} />
+                  )}
                 </div>
               </div>
             )}

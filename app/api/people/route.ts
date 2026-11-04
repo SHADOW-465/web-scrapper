@@ -44,6 +44,7 @@ export async function POST(req: Request) {
   return ndjson(async (emit, signal) => {
     const deadline = Date.now() + BUDGET_MS;
     let quota: string | undefined;
+    let quotaScope: "day" | "minute" | undefined;
     let searchesUsed = 0;
     // AI web search, one at a time (8K tokens/min on the free tier), only while budget, time and quota allow.
     let searchLock: Promise<unknown> = Promise.resolve();
@@ -56,8 +57,10 @@ export async function POST(req: Request) {
             try {
               return await aiWebsiteCandidates(name, country);
             } catch (e) {
-              if (e instanceof AiQuotaError) quota = e.message;
-              else emit({ type: "notice", message: `AI web search failed: ${safeMessage(e)}` });
+              if (e instanceof AiQuotaError) {
+                quota = e.message;
+                quotaScope = e.scope;
+              } else emit({ type: "notice", message: `AI web search failed: ${safeMessage(e)}` });
               return [];
             }
           });
@@ -106,11 +109,14 @@ export async function POST(req: Request) {
           if (d.people.length > before[i]) emit({ type: "company", ...publicResult(d) }); // the updated row replaces the earlier one
         });
       } catch (e) {
-        if (e instanceof AiQuotaError) quota = e.message; // shown to the user, not hidden
+        if (e instanceof AiQuotaError) {
+          quota = e.message; // shown to the user, not hidden
+          quotaScope = e.scope;
+        }
         else emit({ type: "notice", message: `AI step skipped: ${safeMessage(e)}` });
       }
     }
-    emit({ type: "ai", enabled: aiEnabled(), quotaMessage: quota, searches: searchesUsed, ...takeUsage() });
+    emit({ type: "ai", enabled: aiEnabled(), quotaMessage: quota, quotaScope, searches: searchesUsed, ...takeUsage() });
     emit({ type: "done", pending: queue.map((c) => c.id) });
   });
 }

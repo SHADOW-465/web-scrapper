@@ -1,6 +1,7 @@
 import { denied, hasAccess } from "@/lib/access";
 import { ndjson } from "@/lib/ndjson";
 import { SignInError } from "@/lib/login";
+import { takeUsage } from "@/lib/groq";
 import { safeMessage } from "@/lib/redact";
 import { cookieFrom, sealSession, SessionError } from "@/lib/session";
 import { scan, SiteReadError } from "@/lib/scan";
@@ -47,6 +48,7 @@ export async function POST(req: Request) {
           onSession: (jar) => emit({ type: "session", session: sealSession(jar, target.toString()) }),
         });
         // The pasted cookie is never echoed: it only survives inside sealed feed tokens.
+        emit({ type: "ai", ...takeUsage() }); // naming columns may have used AI: count it in the daily bar
         emit({ type: "result", ...result });
       } catch (err: unknown) {
         const message = safeMessage(err, secrets);
