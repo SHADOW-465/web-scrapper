@@ -10,7 +10,8 @@
 import { crawlPages, fetchChunk, HttpError, LockedError, lookupBatch, readItemBatch, type CrawlRequest } from "./client-api";
 import type { Format } from "./exporters";
 import { assemble, specFor, urlsFor, type ItemResult } from "./items-client";
-import { companiesFrom, joinLeads, leadFieldNames, type CompanyRef, type LeadsState } from "./leads";
+import { companiesFrom, companyKey, joinLeads, leadFieldNames, type CompanyRef, type LeadsState } from "./leads";
+import { planFilter, planHeaders, planRows, type Plan } from "./wishes";
 import { feedRows, hasPageContent, pageRows, type Feed, type PageList, type Row, type Workspace } from "./model";
 
 export type Scope = "page" | "feed" | "crawl";
@@ -28,6 +29,10 @@ export interface JobInput {
   gated?: boolean;
   /** Look up each company's decision-makers after the rows (and item pages) are in. */
   leads?: LeadsState;
+  /** A plain-words request: the file has exactly these columns (see lib/wishes.ts). */
+  plan?: Plan;
+  /** Stop fetching rows once this many are in (a limit with no filter needs no more). */
+  stopAfter?: number;
 }
 
 export interface Job extends JobInput {
@@ -84,7 +89,25 @@ export function baseRows(job: Pick<Job, "scope" | "ws" | "list" | "feed" | "raw"
 export function finalRows(job: Job): Row[] {
   const { rows, urls } = baseRows(job);
   const out = assemble(rows, urls, job.ws.columns, job.results);
+  if (job.plan) return planOutput(job, out);
   return job.leads?.config.on ? joinLeads(out, job.leads.config, job.leads.results, leadNames(job)) : out;
+}
+
+/** The rows of a plain-words export: her columns only, one row per company. */
+export function planOutput(job: Pick<Job, "plan" | "leads" | "ws" | "scanUrl">, rows: Row[]): Row[] {
+  const L = job.leads;
+  const leadOf = (r: Row) => {
+    if (!L) return undefined;
+    const name = String(r[L.config.nameCol] ?? "").trim();
+    return name ? L.results[companyKey(name, L.config.countryCol ? String(r[L.config.countryCol] ?? "").trim() || undefined : undefined)] : undefined;
+  };
+  let host = "the directory";
+  try {
+    host = new URL(job.scanUrl).hostname.replace(/^www\./, "");
+  } catch {
+    /* keep the generic name */
+  }
+  return planRows(rows, job.plan!, job.ws.columns, leadOf, `Listed on ${host}`);
 }
 
 /** The lead column names for this job (renamed where they clash with the user's columns). */
@@ -92,6 +115,7 @@ export const leadNames = (job: Pick<Job, "ws">) => leadFieldNames(job.ws.columns
 
 /** Column names written to the file: the user's columns, then the lead columns. */
 export function exportFields(job: Job): string[] {
+  if (job.plan) return planHeaders(job.plan);
   const own = job.ws.columns.filter((c) => c.on).map((c) => c.name);
   return job.leads?.config.on ? [...own, ...Object.values(leadNames(job))] : own;
 }
@@ -100,6 +124,12 @@ export function exportFields(job: Job): string[] {
 export function companiesOf(job: Job): CompanyRef[] {
   if (!job.leads) return [];
   const { rows, urls } = baseRows(job);
+  if (job.plan) {
+    // Only companies the plan keeps (country filter), in row order, up to its limit.
+    const keep = new Set(planFilter(rows, job.plan, job.ws.columns));
+    const idx = rows.map((r, i) => (keep.has(r) ? i : -1)).filter((i) => i >= 0);
+    return companiesFrom(idx.map((i) => rows[i]), idx.map((i) => urls[i]), job.leads.config);
+  }
   return companiesFrom(rows, urls, job.leads.config);
 }
 
@@ -215,7 +245,7 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
             // The server retried a page and gave up; keep what arrived and retry from that page.
             job.nextIndex = chunk.failedAt;
             await saveJob(job);
-            wait(`${chunk.error}. Trying again in 10s`);
+            wait(`${String(chunk.error).replace(/\.$/, "")}. Trying again in 10s`);
             await sleep(10_000, signal);
             continue;
           }
@@ -223,6 +253,12 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           await saveJob(job);
           report();
           if (chunk.next == null) break;
+          if (job.stopAfter && job.raw.length >= job.stopAfter) {
+            job.note = job.plan?.limit
+              ? `Only the first ${job.raw.length.toLocaleString()} rows were fetched: enough for the ${job.plan.limit.toLocaleString()} you asked for.`
+              : `Stopped after ${job.raw.length.toLocaleString()} rows.`;
+            break;
+          }
         }
       } else if (job.scope === "crawl" && job.crawl) {
         job.raw = [];

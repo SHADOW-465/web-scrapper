@@ -5,6 +5,7 @@
  * that page's address.
  */
 import { appearsIn, cleanLinkedin, extractFacts, GENERIC_MAIL, guardAiPerson, normalise, type PageFacts, type Person } from "./people";
+import { countryTld } from "./countries";
 import { aiEnabled, groqJson, groqSearch } from "./groq";
 import { safeFetch, UA } from "./safe-fetch";
 
@@ -161,24 +162,7 @@ export async function aiWebsiteCandidates(name: string, country?: string): Promi
 
 export type WebsiteSearch = (name: string, country?: string) => Promise<string[]>;
 
-const TLD: Array<[RegExp, string]> = [
-  [/^(deutschland|germany)$/, ".de"], [/^([öo]sterreich|austria)$/, ".at"], [/^(schweiz|switzerland|suisse|svizzera)$/, ".ch"],
-  [/^(frankreich|france)$/, ".fr"], [/^(italien|italy|italia)$/, ".it"], [/^(spanien|spain|espa[ñn]a)$/, ".es"], [/^(polen|poland|polska)$/, ".pl"],
-  [/^(niederlande|netherlands|nederland)$/, ".nl"], [/^(belgien|belgium|belgique)$/, ".be"], [/^(vereinigtes k[öo]nigreich|united kingdom|uk|gro[ßs]britannien|england|schottland|scotland)$/, ".co.uk"],
-  [/^(vereinigte staaten|united states|usa|us)$/, ".com"], [/^portugal$/, ".pt"], [/^(tschechien|czech republic|czechia)$/, ".cz"], [/^(d[äa]nemark|denmark)$/, ".dk"],
-  [/^(schweden|sweden)$/, ".se"], [/^(norwegen|norway)$/, ".no"], [/^(finnland|finland)$/, ".fi"], [/^(ungarn|hungary)$/, ".hu"], [/^(griechenland|greece)$/, ".gr"],
-  [/^(irland|ireland)$/, ".ie"], [/^(luxemburg|luxembourg)$/, ".lu"], [/^(rum[äa]nien|romania)$/, ".ro"], [/^(kroatien|croatia)$/, ".hr"], [/^(slowenien|slovenia)$/, ".si"],
-  [/^(slowakei|slovakia)$/, ".sk"], [/^(litauen|lithuania)$/, ".lt"], [/^(lettland|latvia)$/, ".lv"], [/^(estland|estonia)$/, ".ee"], [/^(bulgarien|bulgaria)$/, ".bg"],
-  [/^(serbien|serbia)$/, ".rs"], [/^(ukraine)$/, ".ua"], [/^(kanada|canada)$/, ".ca"], [/^(australien|australia)$/, ".com.au"], [/^(neuseeland|new zealand)$/, ".co.nz"],
-  [/^(japan)$/, ".co.jp"], [/^(republik korea|s[üu]dkorea|south korea|korea)$/, ".co.kr"], [/^(indien|india)$/, ".in"], [/^(brasilien|brazil)$/, ".com.br"],
-  [/^(mexiko|mexico)$/, ".com.mx"], [/^(argentinien|argentina)$/, ".com.ar"], [/^(t[üu]rkei|turkey|t[üu]rkiye)$/, ".com.tr"], [/^(israel)$/, ".co.il"],
-  [/^(singapur|singapore)$/, ".com.sg"], [/^(taiwan)$/, ".com.tw"], [/^(s[üu]dafrika|south africa)$/, ".co.za"], [/^(china|volksrepublik china)$/, ".cn"],
-];
-/** The usual web domain ending for a country name (German or English, as fairs list them). */
-export const countryTld = (country?: string) => {
-  const c = (country ?? "").trim().toLowerCase();
-  return TLD.find(([re]) => re.test(c))?.[1];
-};
+
 
 /** Find the company's own website: search first, then verified domain guesses (a guess is only used if the page names the company). */
 export async function discoverWebsite(name: string, country: string | undefined, fetcher: PageFetcher, search?: WebsiteSearch): Promise<{ url: string; source: "ai-search" | "domain-check"; html: string } | null> {
@@ -469,6 +453,8 @@ export async function resolveHardCases(results: CompanyResult[]): Promise<number
 export const publicResult = ({ _hard: _h, ...rest }: CompanyResult) => rest;
 
 /* ------------------------------------------------------------ offline self-check */
+
+export { countryTld };
 
 export async function selfCheck(): Promise<string> {
   const eq = (a: unknown, b: unknown, m: string) => {

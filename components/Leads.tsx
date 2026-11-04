@@ -4,7 +4,7 @@ import { AlertTriangle, Bot, Check, ChevronRight, Loader2, Sparkles, UserSearch 
 import type { AiStatus } from "@/lib/client-api";
 import { estimateSeconds, type LeadsConfig, type LeadsState } from "@/lib/leads";
 
-export interface TrySummary { looked: number; website: number; person: number; email: number; linkedin: number; notes: string[] }
+export interface TrySummary { looked: number; website: number; person: number; email: number; linkedin: number; notes: string[]; quota?: string }
 
 const duration = (secs: number) => {
   if (secs < 90) return "about a minute";
@@ -28,7 +28,7 @@ export function LeadsPanel(props: {
   trying: string | null;
   tried: TrySummary | null;
   tryError: string | null;
-  onTry: () => void;
+  onTry: () => void | Promise<unknown>;
   run: LeadsState | null;
   busy: boolean;
 }) {

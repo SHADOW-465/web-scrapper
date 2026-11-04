@@ -1,16 +1,18 @@
 "use client";
 
-import { AlertTriangle, ArrowRight, Bookmark, BookmarkPlus, Check, Download, EyeOff, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Bookmark, BookmarkPlus, Check, ChevronRight, Download, EyeOff, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { aiStatus, fetchChunk, LockedError, lookupBatch, sampleItems, scanPage, ScanError, SkippedItemsError, unlock, type AiStatus, type CrawlRequest, type ScanResult } from "@/lib/client-api";
+import { aiStatus, fetchChunk, LockedError, lookupBatch, planWithAi, sampleItems, scanPage, ScanError, SkippedItemsError, unlock, type AiStatus, type CrawlRequest, type ScanResult } from "@/lib/client-api";
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
 import { discoveryRequest, fillPattern, findItemSource, sourceFromPastedUrl, specFor, spread, widerRows } from "@/lib/items-client";
-import { baseRows, deleteJob, exportFields, failedItems, finalRows, leadNames, loadJobs, newJob, progressOf, runJob, type Job, type Progress } from "@/lib/job";
+import { baseRows, deleteJob, exportFields, failedItems, finalRows, leadNames, loadJobs, newJob, planOutput, progressOf, runJob, type Job, type Progress } from "@/lib/job";
+import { availableFrom, describeSource, followUp, fromAi, needsLookup, parseRequest, planFilter, planHeaders, resolvePlan, urlIn, type Plan } from "@/lib/wishes";
 import { companiesFrom, guessLeadColumns, joinLeads, newLeadsState, type LeadResult, type LeadsConfig } from "@/lib/leads";
 import { extraFields, findDirectoryLinksInHtml, listRowCount, looksLikeNavigation, matchList, pageOnly, visiblePageRows, type Column, type DirectoryLink, type ItemSource, type Row, type Workspace } from "@/lib/model";
 import { deleteRecipe, loadRecipes, saveRecipe, type Recipe } from "@/lib/recipes";
 import { initial, reducer } from "@/lib/studio-state";
-import { Failed, Locked, Printing, Welcome } from "./Blank";
+import { Failed, Locked, Printing } from "./Blank";
+import { ChatHome, ChatPanel, type ChatMsg } from "./Chat";
 import { LeadsPanel, type TrySummary } from "./Leads";
 import Mark from "./Mark";
 import Preview from "./Preview";
@@ -76,6 +78,14 @@ export default function Studio() {
   const [trying, setTrying] = useState<string | null>(null);
   const [tried, setTried] = useState<TrySummary | null>(null);
   const [tryError, setTryError] = useState<string | null>(null);
+  // The conversation: her request in plain words, and the export plan read from it.
+  const [chat, setChat] = useState<ChatMsg[]>([]);
+  const [plan, setPlan] = useState<Plan | null>(null);
+  const [planning, setPlanning] = useState(false);
+  const [trialWanted, setTrialWanted] = useState(false);
+  const pendingAsk = useRef<string | null>(null);
+  const scanMsg = useRef<string | null>(null);
+  const runMsg = useRef<string | null>(null);
 
   const sheet = useRef<SheetHandle>(null);
   const abort = useRef<AbortController | null>(null);
@@ -88,6 +98,15 @@ export default function Studio() {
   const say = useCallback((t: string) => {
     setToast(t);
     window.setTimeout(() => setToast((cur) => (cur === t ? null : cur)), 3200);
+  }, []);
+
+  const addMsg = useCallback((m: Omit<ChatMsg, "id"> & { id?: string }) => {
+    const id = m.id ?? crypto.randomUUID();
+    setChat((c) => [...c, { ...m, id }]);
+    return id;
+  }, []);
+  const updateMsg = useCallback((id: string | null, patch: Partial<ChatMsg>) => {
+    if (id) setChat((c) => c.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
 
   /* -------------------------------------------------------- boot */
@@ -129,6 +148,8 @@ export default function Studio() {
     gotReady.current = false;
     looking.current.clear();
     setLeadPreview({});
+    setPlan(null);
+    setTrialWanted(false);
     setTried(null);
     setTryError(null);
     dispatch({ type: "reset" });
@@ -368,19 +389,101 @@ export default function Studio() {
     void lookForItems(st.active, { urls: [addr], source: src });
   }
 
+  /* -------------------------------------------------------- conversation effects */
+
+  // Scan progress and its outcome, in the conversation.
+  useEffect(() => {
+    if (phase === "scanning" && status.length) updateMsg(scanMsg.current, { text: `Reading ${hostOf(url)}… ${status[status.length - 1].toLowerCase()}` });
+    if (phase === "error") {
+      updateMsg(scanMsg.current, { busy: false, tone: "err", text: error, actions: [{ id: "retry-scan", label: "Try again" }] });
+      scanMsg.current = null;
+    }
+  }, [phase, status, error, url, updateMsg]);
+
+  // Page read: say what was found, then act on the request that came with the link.
+  const pageSettled = phase === "ready" && (iframeReady || layoutMissing) && (!!ws || noListFound);
+  useEffect(() => {
+    if (!pageSettled || !scanMsg.current || !scan) return;
+    const id = scanMsg.current;
+    scanMsg.current = null;
+    if (!ws) {
+      updateMsg(id, { busy: false, tone: "warn", text: `I read ${hostOf(scan.finalUrl)}, but found no company list on this page.${directoryLinks.length ? ` Try the directory: ${directoryLinks.map((d) => d.label).join(", ")}.` : ""}` });
+      pendingAsk.current = null;
+      return;
+    }
+    const total = feed?.total ?? null;
+    updateMsg(id, {
+      busy: false,
+      text: `I read “${scan.title}”: ${total ? `${fmtN(total)} ${companiesWord} in the site's data` : `${fmtN(onPage)} ${companiesWord} on this page`}${feed?.paginated ? `, ${fmtN(onPage)} per page` : ""}.`,
+    });
+    const ask = pendingAsk.current;
+    pendingAsk.current = null;
+    if (ask) void makePlan(ask);
+    else addMsg({ role: "assistant", text: "What do you need in the export? For example: company, country, CEO name, email, LinkedIn, booth number." });
+  }, [pageSettled]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The trial: 5 companies, once each company's page on the site is known.
+  useEffect(() => {
+    if (!trialWanted || !leadsOn || trying || ws?.items?.status === "looking") return;
+    setTrialWanted(false);
+    const id = addMsg({ role: "assistant", text: "Looking up the first 5 companies (about 20–40 seconds)…", busy: true });
+    void tryLeads().then((t) => {
+      const total = expectedRows ?? onPage;
+      if (!t) return updateMsg(id, { busy: false, tone: "err", text: "The trial didn't work. You can still get the file.", actions: exportActions(plan, total) });
+      updateMsg(id, {
+        busy: false,
+        tone: t.quota ? "warn" : "ok",
+        text: [
+          `Tried ${t.looked}: ${t.website} with a website, ${t.person} with a named decision-maker, ${t.email} with a personal email, ${t.linkedin} with LinkedIn. They're in the table.`,
+          t.quota ?? "",
+          `The full run looks up ${fmtN(plan?.limit ? Math.min(plan.limit, total ?? plan.limit) : total ?? 0)} companies; you can leave it running.`,
+        ].filter(Boolean).join("\n"),
+        actions: exportActions(plan, total),
+      });
+    });
+  }, [trialWanted, leadsOn, trying, ws?.items?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Export progress and result, in the conversation (for exports started from it).
+  useEffect(() => {
+    if (!run || !plan || !runMatches) return;
+    const p = run.progress;
+    const unit = p.stage === "items" ? "pages" : p.stage === "people" ? "companies" : "rows";
+    if (run.state === "running") {
+      const text = `${p.label}: ${fmtN(p.done)}${p.of ? ` of ${fmtN(p.of)}` : ""} ${unit}`;
+      if (!runMsg.current) runMsg.current = addMsg({ role: "assistant", text, busy: true, progress: { done: p.done, of: p.of } });
+      else updateMsg(runMsg.current, { text, progress: { done: p.done, of: p.of } });
+    } else if (runMsg.current) {
+      const id = runMsg.current;
+      runMsg.current = null;
+      if (run.state === "done") updateMsg(id, { busy: false, progress: undefined, tone: "ok", text: run.message ?? "Done.", actions: [{ id: "download-xlsx", label: "Download Excel again" }, { id: "download-csv", label: "CSV" }] });
+      else if (run.state === "stopped") updateMsg(id, { busy: false, progress: undefined, tone: "warn", text: run.message ?? "Paused.", actions: [{ id: "resume", label: "Resume", primary: true }] });
+      else updateMsg(id, { busy: false, progress: undefined, tone: "err", text: run.message ?? "The export stopped.", actions: [{ id: "resume", label: "Retry from where it stopped", primary: true }] });
+    }
+  }, [run?.state, run?.progress.done, run?.progress.label]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* -------------------------------------------------------- preview */
 
   const crawlSelection = (w: Workspace) => JSON.stringify(w.columns.filter((c) => c.on && c.page).map((c) => ({name:c.name,page:c.page})));
   const jobLeadSig = (j: Job) => (j.leads?.config.on ? [j.leads.config.nameCol, j.leads.config.countryCol, j.leads.config.websiteCol, j.leads.config.limit].join("|") : "");
+  const planSig = (p: Plan | null | undefined) => (p ? JSON.stringify([p.items, p.limit, p.country, p.sources]) : "");
   const runMatches = !!run && !!ws && run.job.scanUrl === scan?.finalUrl && run.job.ws.listId === ws.listId && run.job.scope === scope && run.state !== "error"
+    && planSig(run.job.plan) === planSig(plan)
     && jobLeadSig(run.job) === leadSig
     && (scope !== "crawl" || (run.job.crawl?.maxPages === maxPages && run.job.crawl?.mode === crawlMode && crawlSelection(run.job.ws) === crawlSelection(ws)));
   const rows: Row[] = useMemo(() => {
     if (!ws) return [];
     if (runMatches && run) return finalRows({ ...run.job, ws });
     // Before an export: this page's rows, with any trial lookups joined in.
+    if (plan && scan) {
+      const L = leadsOn && leadsCfg ? { ...newLeadsState(stripCfg(leadsCfg)), results: leadPreview } : undefined;
+      return planOutput({ plan, leads: L, ws, scanUrl: scan.finalUrl }, pageRowList);
+    }
     return leadsOn && leadsCfg ? joinLeads(pageRowList, leadsCfg, leadPreview, leadNames({ ws })) : pageRowList;
-  }, [ws, pageRowList, run, runMatches, leadsOn, leadsCfg, leadPreview]);
+  }, [ws, pageRowList, run, runMatches, leadsOn, leadsCfg, leadPreview, plan, scan]);
+  const planColumns: Column[] = useMemo(
+    () => (plan ? planHeaders(plan).map((name) => ({ id: `plan:${name}`, name, ink: / \((source|confidence)\)$/.test(name) ? "#e8e3d4" : "#f7e733", on: true, sample: "" })) : []),
+    [plan],
+  );
 
   /* -------------------------------------------------------- snapshot paint */
 
@@ -440,14 +543,15 @@ export default function Studio() {
     }
   }
 
-  async function startExport() {
+  async function startExport(fmt: Format = format) {
     if (!ws || !scan) return;
     if (!onCols.length) return say("Switch on at least one column first.");
+    const format = fmt;
     const title = fileName.trim() || activeList?.name || scan.title || hostOf(scan.finalUrl);
     const spec = specFor(ws);
 
     // Rows already here and nothing to visit: instant.
-    if (scope === "page" && !spec && !leadsOn) {
+    if (scope === "page" && !spec && !leadsOn && !plan) {
       const out = pageRowList;
       const { blob, filename } = await buildFile(format, out, onCols.map((c) => c.name), title);
       download(blob, filename);
@@ -482,6 +586,9 @@ export default function Studio() {
       title, format, scanUrl: scan.finalUrl, scope, ws, list: activeList, feed, crawl, gated: !!cookie.trim(),
       // Companies already looked up in a trial run are not looked up again.
       leads: leadsOn && leadsCfg ? newLeadsState(stripCfg(leadsCfg), leadPreview) : undefined,
+      plan: plan ?? undefined,
+      // A limit without a country filter needs only the first pages (a little extra for repeated names).
+      stopAfter: plan?.limit && !plan.country && scope === "feed" ? Math.ceil(plan.limit * 1.2) + 40 : undefined,
     }));
   }
 
@@ -498,11 +605,17 @@ export default function Studio() {
     }
   }
 
-  async function tryLeads() {
-    if (!ws || !scan || !leadsCfg) return;
-    const { rows: base, urls } = baseRows({ scope: "page", ws, list: activeList, feed, raw: [] });
-    const companies = companiesFrom(base, urls, { ...leadsCfg, limit: 5 });
-    if (!companies.length) return setTryError(`No company names in the "${leadsCfg.nameCol}" column on this page.`);
+  async function tryLeads(): Promise<TrySummary | null> {
+    if (!ws || !scan || !leadsCfg) return null;
+    const { rows: all, urls: allUrls } = baseRows({ scope: "page", ws, list: activeList, feed, raw: [] });
+    // With a plan, only rows it keeps (e.g. its country filter) are tried.
+    const keep = new Set(plan ? planFilter(all, plan, ws.columns) : all);
+    const idx = all.map((r, i) => (keep.has(r) ? i : -1)).filter((i) => i >= 0);
+    const companies = companiesFrom(idx.map((i) => all[i]), idx.map((i) => allUrls[i]), { ...leadsCfg, limit: 5 });
+    if (!companies.length) {
+      setTryError(`No company names in the "${leadsCfg.nameCol}" column on this page${plan?.country ? ` from ${plan.country}` : ""}.`);
+      return null;
+    }
     const signal = abort.current?.signal;
     setTryError(null);
     setTried(null);
@@ -519,25 +632,153 @@ export default function Studio() {
         for (const n of out.notices) if (!notes.includes(n)) notes.push(n);
         queue = queue.filter((c) => out.pending.includes(c.id));
       }
-      if (signal?.aborted) return;
+      if (signal?.aborted) return null;
       setLeadPreview((cur) => ({ ...cur, ...found }));
       const list = Object.values(found);
-      setTried({
+      const summary: TrySummary = {
         looked: list.length,
         website: list.filter((r) => r.website).length,
         person: list.filter((r) => r.people.length).length,
         email: list.filter((r) => r.people.some((p) => p.email)).length,
         linkedin: list.filter((r) => r.companyLinkedin || r.people.some((p) => p.linkedin)).length,
         notes, // a 429 is shown in red in the AI box, not inside this success note
-      });
+        quota,
+      };
+      setTried(summary);
       if (quota) setAi((a) => (a ? { ...a, ok: false, message: quota } : a));
+      return summary;
     } catch (e) {
-      if (signal?.aborted) return;
-      if (e instanceof LockedError) return setPhase("locked");
+      if (signal?.aborted) return null;
+      if (e instanceof LockedError) {
+        setPhase("locked");
+        return null;
+      }
       setTryError(e instanceof Error ? e.message : String(e));
+      return null;
     } finally {
       setTrying(null);
     }
+  }
+
+  /* -------------------------------------------------------- the conversation */
+
+  const companiesWord = activeList?.name && /aussteller|exhibitor/i.test(activeList.name) ? "exhibitors" : "rows";
+
+  function onChatSend(text: string) {
+    addMsg({ role: "user", text });
+    const link = urlIn(text);
+    const ask = link ? text.replace(link, "").replace(link.replace(/^https?:\/\//, ""), "").trim() : text.trim();
+    const sameSite = link && scan && hostOf(link) === hostOf(scan.finalUrl) && new URL(link).pathname === new URL(scan.finalUrl).pathname;
+    if (link && !sameSite) {
+      pendingAsk.current = ask;
+      scanMsg.current = addMsg({ role: "assistant", text: `Reading ${hostOf(link)}…`, busy: true });
+      pending.current = null;
+      void startScan(link);
+      return;
+    }
+    if (!scan || phase !== "ready") {
+      if (phase === "scanning") {
+        pendingAsk.current = [pendingAsk.current, ask].filter(Boolean).join("\n");
+        addMsg({ role: "assistant", text: "Got it. I'll apply that as soon as the page is read." });
+      } else addMsg({ role: "assistant", text: "Which website? Paste its link, with what you need in the export." });
+      return;
+    }
+    if (ask) void makePlan(ask);
+  }
+
+  async function makePlan(text: string) {
+    if (!ws || !scan) return;
+    setPlanning(true);
+    const avail = availableFrom(ws.columns, pageRowList, extras);
+    const prev = plan;
+    const thinking = addMsg({ role: "assistant", text: prev ? "Changing your export…" : "Reading your request…", busy: true });
+    let next: Plan;
+    let how = "";
+    try {
+      const rules = prev ? followUp(prev, text, avail) : { ...resolvePlan(parseRequest(text), avail), request: text };
+      const answer = await planWithAi({
+        message: text, previous: prev?.request, current: prev?.items.map((i) => i.label),
+        fields: avail.map((a) => ({ name: a.name, samples: a.samples.slice(0, 3) })),
+      }, abort.current?.signal);
+      const viaAi = answer.ai ? fromAi(answer.ai, avail, prev ? `${prev.request}\n${text}` : text, prev ?? undefined) : null;
+      next = viaAi ?? rules;
+      how = viaAi ? "Understood by AI (Groq)." : answer.reason === "quota" ? `Understood by the built-in rules: ${answer.message}` : answer.reason === "off" ? "Understood by the built-in rules (AI is off)." : `Understood by the built-in rules (AI didn't answer: ${answer.message}).`;
+      if (answer.reason === "quota") setAi((a) => (a ? { ...a, ok: false, message: answer.message } : a));
+    } catch (e) {
+      setPlanning(false);
+      if (e instanceof LockedError) return setPhase("locked");
+      updateMsg(thinking, { busy: false, tone: "err", text: e instanceof Error ? e.message : String(e) });
+      return;
+    }
+    if (!next.items.length) {
+      setPlanning(false);
+      updateMsg(thinking, { busy: false, tone: "warn", text: `I couldn't match that to anything on this page${next.unresolved.length ? ` (${next.unresolved.join(", ")})` : ""}. Try names like: company, country, booth, CEO name, email, LinkedIn.` });
+      return;
+    }
+    applyPlan(next);
+    const lookup = needsLookup(next);
+    const total = expectedRows ?? onPage;
+    const lines = [
+      `Here's your export: ${next.items.length} column${next.items.length === 1 ? "" : "s"}${next.sources ? ", each with its source and confidence" : ""}.`,
+      next.country || next.limit ? `Only ${[next.country ? `companies from ${next.country}` : "", next.limit ? `the first ${next.limit}` : ""].filter(Boolean).join(", ")}.` : "",
+      next.unresolved.length ? `Not available on this site: ${next.unresolved.join(", ")}.` : "",
+      lookup ? `I'll look up each company's decision-makers on its fair page and its own website. Trying the first 5 now…` : "",
+      how,
+    ].filter(Boolean);
+    updateMsg(thinking, {
+      busy: false,
+      text: lines.join("\n"),
+      chips: next.items.map((i) => ({ label: i.label, hint: describeSource(i.source) })),
+      actions: lookup ? [] : exportActions(next, total),
+    });
+    setPlanning(false);
+    if (lookup) setTrialWanted(true);
+  }
+
+  /** Switch on the columns the plan reads, and set the decision-maker lookup to match. */
+  function applyPlan(next: Plan) {
+    if (!ws) return;
+    const needIds = new Set<string>();
+    for (const it of next.items) if (it.source.type === "column") needIds.add(it.source.id);
+    if (next.companyColId) needIds.add(next.companyColId);
+    if (next.country && next.countryColId) needIds.add(next.countryColId);
+    for (const id of needIds) {
+      const c = ws.columns.find((x) => x.id === id);
+      if (c && !c.on) dispatch({ type: "toggle", id });
+      if (!c && id.startsWith("feed:")) {
+        const f = extras.find((x) => `feed:${x.key}` === id);
+        if (f) dispatch({ type: "addFeedField", field: f });
+      }
+    }
+    for (const it of next.items) {
+      if (it.source.type !== "feed") continue;
+      const key = it.source.key;
+      const f = extras.find((x) => x.key === key);
+      if (f) dispatch({ type: "addFeedField", field: f });
+    }
+    const company = next.companyColId ? ws.columns.find((c) => c.id === next.companyColId) : undefined;
+    const country = next.countryColId ? ws.columns.find((c) => c.id === next.countryColId) : undefined;
+    if (needsLookup(next) && company) {
+      setLeadsCfg((cur) => ({ on: true, nameCol: company.name, countryCol: country?.name, websiteCol: cur?.websiteCol, limit: next.limit, aiSearch: cur?.aiSearch ?? 10, listId: ws.listId }));
+    } else setLeadsCfg((cur) => (cur ? { ...cur, on: false } : cur));
+    setPlan(next);
+    setDoneNote(null);
+  }
+
+  function exportActions(p: Plan | null, total: number | null) {
+    const what = p?.limit ? `the first ${fmtN(p.limit)}${p.country ? ` from ${p.country}` : ""}` : p?.country ? `all from ${p.country}` : total ? `all ${fmtN(total)}` : "all";
+    return [
+      { id: "export-xlsx", label: `Get ${what} as Excel`, primary: true },
+      { id: "export-csv", label: "CSV" },
+    ];
+  }
+
+  function onChatAction(id: string) {
+    if (id === "export-xlsx" || id === "download-xlsx") { setFormat("xlsx"); runMsg.current = null; void startExport("xlsx"); }
+    else if (id === "export-csv" || id === "download-csv") { setFormat("csv"); runMsg.current = null; void startExport("csv"); }
+    else if (id === "try") setTrialWanted(true);
+    else if (id === "retry-scan") void startScan(url);
+    else if (id === "resume" && run) void execute(run.job);
   }
 
   function saveCurrent(name: string) {
@@ -579,6 +820,7 @@ export default function Studio() {
   const hasItemCols = onCols.some((c) => c.item);
   const exportLabel =
     runMatches && run?.state === "done" ? `Download ${fmtN(rows.length)} rows` :
+    plan ? `Get ${plan.limit ? `the first ${fmtN(plan.limit)}` : "all"}${plan.country ? ` from ${plan.country}` : ""}${needsLookup(plan) ? " + decision-makers" : ""}` :
     leadsOn ? (scope === "page" ? `Get ${fmtN(onPage)} rows + decision-makers` : scope === "feed" && feed?.total ? `Get all ${fmtN(feed.total)} + decision-makers` : "Get rows + decision-makers") :
     scope === "page" ? (hasItemCols ? `Get ${fmtN(onPage)} rows` : `Export ${fmtN(onPage)} rows`) :
     scope === "feed" ? (feed?.total ? `Get all ${fmtN(feed.total)} rows` : "Get every page") :
@@ -641,24 +883,23 @@ export default function Studio() {
         )}
       </header>
 
-      {phase === "idle" && (
-        <div className="blank-wrap">
+      {(phase === "idle" || (chat.length > 0 && (phase === "scanning" || phase === "error"))) && (
+        <ChatHome messages={chat} onSend={onChatSend} onAction={onChatAction} busy={phase === "scanning" || planning}>
           {jobCard}
-          <Welcome onTry={(u) => { pending.current = null; void startScan(u); }} />
-        </div>
+        </ChatHome>
       )}
-      {phase === "scanning" && <Printing host={hostOf(url)} status={status} />}
-      {phase === "error" && <Failed message={error} kind={errorKind} onRetry={() => void startScan(url)} onBack={() => setPhase("idle")} />}
+      {phase === "scanning" && !chat.length && <Printing host={hostOf(url)} status={status} />}
+      {phase === "error" && !chat.length && <Failed message={error} kind={errorKind} onRetry={() => void startScan(url)} onBack={() => setPhase("idle")} />}
       {phase === "locked" && <Locked onUnlock={async (pw) => { const ok = await unlock(pw); if (ok) { setPhase("idle"); if (url) void startScan(url); } return ok; }} />}
 
       {phase === "ready" && scan && (
         <div className="work">
           <div className="deskcol">
             <Preview
-              columns={ws ? [...ws.columns, ...leadColumns] : []}
+              columns={plan ? planColumns : ws ? [...ws.columns, ...leadColumns] : []}
               rows={rows}
-              total={runMatches && run?.state === "done" ? rows.length : scope === "page" ? rows.length : expectedRows ?? rows.length}
-              label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : hasItemCols ? "this page; item-page columns fill in when you export" : leadsOn ? "this page; decision-maker columns fill in when you export or try" : scope === "page" ? "this page" : "this page, before fetching the rest"}
+              total={runMatches && run?.state === "done" ? rows.length : plan ? (plan.limit ?? (plan.country ? rows.length : expectedRows ?? rows.length)) : scope === "page" ? rows.length : expectedRows ?? rows.length}
+              label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : plan ? (needsLookup(plan) ? "this page; decision-maker columns fill in for tried companies and when you export" : "this page, as your export will look") : hasItemCols ? "this page; item-page columns fill in when you export" : leadsOn ? "this page; decision-maker columns fill in when you export or try" : scope === "page" ? "this page" : "this page, before fetching the rest"}
               tableOnly={tableOnly}
               onToggleTableOnly={() => setTableOnly((v) => !v)}
               noListFound={noListFound}
@@ -683,6 +924,9 @@ export default function Studio() {
           <aside className="tray" aria-label="Extraction settings">
             <div className="tray-scroll">
               {jobCard}
+              <ChatPanel messages={chat} onSend={onChatSend} onAction={onChatAction} busy={planning || !!trying} />
+              <details className="advanced" open={!plan}>
+              <summary><ChevronRight size={14} aria-hidden="true" />Advanced settings</summary>
               <section className="section">
                 <div className="section-head"><h2>Found on this page</h2></div>
                 <ListsFound
@@ -754,6 +998,7 @@ export default function Studio() {
                     crawl={{ available: !!crawlAvailable, next: st.next, mode: crawlMode, setMode: setCrawlMode, maxPages, setMaxPages }} />
                 </section>
               )}
+              </details>
             </div>
 
             {ws && (
@@ -779,7 +1024,7 @@ export default function Studio() {
                   <>
                     <div className="exportrow">
                       <input className="fname" value={fileName} onChange={(e) => setFileName(e.target.value)} placeholder={activeList?.name || scan.title || "File name"} aria-label="File name" />
-                      <button className="btn btn-primary" onClick={() => void startExport()} disabled={!onCols.length || busy}>
+                      <button className="btn btn-primary" onClick={() => void startExport(format)} disabled={!onCols.length || busy}>
                         <Download size={16} aria-hidden="true" />{exportLabel}
                       </button>
                     </div>

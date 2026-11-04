@@ -372,6 +372,49 @@ input.mini[type="number"] { width: 68px; font-family: var(--font-mono); }
 .note.err { color: var(--danger); }
 .note.ok { color: var(--ok); }
 
+/* ------------------------------------------------------------ chat */
+
+.chathome { flex: 1; overflow: auto; display: flex; justify-content: center; padding: 48px 20px 40px; }
+.chathome-inner { width: 100%; max-width: 760px; display: grid; gap: 16px; align-content: start; }
+.chathome-head h1 { margin: 0 0 8px; font-size: clamp(24px, 4vw, 34px); letter-spacing: -0.02em; line-height: 1.15; }
+.chathome-head p { margin: 0; color: var(--graphite-2); font-size: 15px; line-height: 1.55; max-width: 62ch; }
+.chat-examples { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chat-examples > span { font-size: 12.5px; color: var(--graphite-3); font-weight: 600; }
+.chat-examples .example { text-align: left; display: grid; gap: 2px; max-width: 100%; }
+.chat-examples .example small { color: var(--graphite-3); font-size: 11.5px; }
+.chat-fine { font-size: 12px; color: var(--graphite-3); margin: 0; }
+
+.composer { position: relative; display: flex; align-items: flex-end; gap: 8px; background: var(--paper); border: 1px solid var(--rule-strong); border-radius: 14px; padding: 8px 8px 8px 12px; box-shadow: var(--lift); }
+.composer:focus-within { border-color: var(--graphite); box-shadow: 0 0 0 3px rgba(29, 31, 34, 0.1); }
+.composer textarea { flex: 1; min-width: 0; border: 0; outline: 0; resize: none; background: transparent; font-size: 14px; line-height: 1.45; padding: 4px 0; max-height: 240px; }
+.composer.big textarea { font-size: 15.5px; }
+.composer .send { flex: none; width: 34px; height: 34px; border-radius: 10px; border: 0; background: var(--graphite); color: #fff; display: grid; place-items: center; cursor: pointer; }
+.composer .send:disabled { background: var(--rule-strong); cursor: default; }
+
+.thread { display: grid; gap: 10px; }
+.chatpanel .thread { max-height: 46vh; overflow: auto; padding-right: 2px; margin-bottom: 10px; }
+.msg { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+.msg.user { justify-content: flex-end; }
+.msg .bubble { min-width: 0; max-width: 100%; font-size: 13.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.msg .bubble p { margin: 0 0 4px; }
+.msg .bubble p:last-child { margin-bottom: 0; }
+.msg.user .bubble { background: var(--graphite); color: #fff; padding: 8px 12px; border-radius: 14px 14px 4px 14px; max-width: 88%; white-space: pre-wrap; }
+.msg.assistant .bubble { background: var(--chrome); padding: 9px 12px; border-radius: 4px 14px 14px 14px; flex: 1; }
+.msg.assistant.err .bubble { background: #fdf0ef; color: var(--danger); }
+.msg.assistant.ok .bubble { background: #eef8f0; }
+.msg.assistant.warn .bubble { background: #fdf6e7; color: #6b4200; }
+.msg .avatar { flex: none; width: 24px; height: 24px; border-radius: 8px; background: var(--yellow); display: grid; place-items: center; color: var(--graphite); margin-top: 2px; }
+.msg.err .avatar { background: #f8d7d4; color: var(--danger); }
+.msg .meter { margin-top: 8px; }
+.chips { list-style: none; padding: 0; margin: 8px 0 2px; display: flex; flex-wrap: wrap; gap: 6px; }
+.chips li { display: grid; gap: 1px; padding: 5px 9px; border-radius: 8px; background: var(--paper); border: 1px solid var(--rule); font-size: 12.5px; max-width: 100%; }
+.chips li span { font-size: 11px; color: var(--graphite-3); }
+.msg-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.advanced > summary { font-size: 13px; font-weight: 700; padding: 12px 18px; cursor: pointer; list-style: none; display: flex; gap: 6px; align-items: center; border-top: 1px solid var(--rule); }
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced[open] > summary svg { transform: rotate(90deg); }
+@media (max-width: 640px) { .chathome { padding: 24px 16px; } .msg.user .bubble { max-width: 100%; } }
+
 /* ------------------------------------------------------------ decision-makers */
 
 .leads .switchrow { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; align-items: start; cursor: pointer; }

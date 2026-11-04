@@ -225,3 +225,21 @@ export async function aiStatus(test = false): Promise<AiStatus> {
   if (res.status === 401) throw new LockedError("locked");
   return (await res.json()) as AiStatus;
 }
+
+/* ------------------------------------------------------------ plain-words request -> plan */
+
+export interface PlanAnswer { ai: import("./wishes").AiPlan | null; reason?: "off" | "quota" | "error"; message?: string }
+
+/** Ask the AI planner to read a request. Never throws for AI problems: `ai` is null and `reason` says why. */
+export async function planWithAi(
+  body: { message: string; previous?: string; current?: string[]; fields: Array<{ name: string; samples: string[] }> },
+  signal?: AbortSignal,
+): Promise<PlanAnswer> {
+  try {
+    const res = await post("/api/plan", body, signal);
+    return (await res.json()) as PlanAnswer;
+  } catch (e) {
+    if (e instanceof LockedError || signal?.aborted) throw e;
+    return { ai: null, reason: "error", message: e instanceof Error ? e.message : String(e) };
+  }
+}
