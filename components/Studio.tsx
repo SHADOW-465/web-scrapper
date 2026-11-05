@@ -1,18 +1,19 @@
 "use client";
 
-import { AlertTriangle, ArrowRight, Bookmark, BookmarkPlus, Check, ChevronRight, Download, EyeOff, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Bookmark, History, BookmarkPlus, Check, ChevronRight, Download, EyeOff, KeyRound, Link2, Loader2, MousePointerClick, RotateCcw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { aiStatus, fetchChunk, LockedError, lookupBatch, planWithAi, sampleItems, scanPage, ScanError, SkippedItemsError, unlock, type AiStatus, type CrawlRequest, type ScanResult } from "@/lib/client-api";
 import { buildFile, download, FORMATS, type Format } from "@/lib/exporters";
 import { discoveryRequest, fillPattern, findItemSource, sourceFromPastedUrl, specFor, spread, widerRows } from "@/lib/items-client";
-import { baseRows, carryOver, deleteJob, exportFields, failedItems, finalRows, leadNames, loadJobs, newJob, planOutput, progressOf, runJob, type Job, type Progress } from "@/lib/job";
+import { baseRows, carryOver, deleteJob, keepJob, exportFields, failedItems, finalRows, leadNames, loadJobs, newJob, planOutput, progressOf, runJob, type Job, type Progress } from "@/lib/job";
 import { availableFrom, describeSource, followUp, fromAi, needsLookup, parseRequest, planFilter, planHeaders, resolvePlan, urlIn, type Plan } from "@/lib/wishes";
 import { companiesFrom, guessLeadColumns, joinLeads, newLeadsState, type LeadResult, type LeadsConfig } from "@/lib/leads";
 import { extraFields, feedRows, findDirectoryLinksInHtml, listRowCount, looksLikeNavigation, matchList, pageOnly, visiblePageRows, type Column, type DirectoryLink, type ItemSource, type Row, type Workspace } from "@/lib/model";
 import { deleteRecipe, loadRecipes, saveRecipe, type Recipe } from "@/lib/recipes";
 import { initial, reducer } from "@/lib/studio-state";
 import { Failed, Locked, Printing } from "./Blank";
-import AiUsageBar from "./AiUsageBar";
+import Dock, { type JobView } from "./Dock";
+import JobViewer from "./JobViewer";
 import { ChatHome, ChatPanel, type ChatMsg } from "./Chat";
 import { affordableSearches, readAiDay } from "@/lib/ai-usage";
 import { LeadsPanel, type TrySummary } from "./Leads";
@@ -71,6 +72,11 @@ export default function Studio() {
   const [fileName, setFileName] = useState("");
   const [run, setRun] = useState<Run | null>(null);
   const [resumable, setResumable] = useState<Job[]>([]);
+  // History: every saved export (running, paused, waiting for AI, finished), the floating panel, and an opened export.
+  const [history, setHistory] = useState<Job[]>([]);
+  const [dockOpen, setDockOpen] = useState(false);
+  const [dockTab, setDockTab] = useState<"exports" | "usage">("exports");
+  const [viewId, setViewId] = useState<string | null>(null);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [saving, setSaving] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -124,6 +130,7 @@ export default function Studio() {
 
   const refreshResumable = useCallback(async () => {
     const jobs = await loadJobs();
+    setHistory(jobs);
     setResumable(jobs.filter((j) => j.stage !== "done"));
   }, []);
 
@@ -607,7 +614,7 @@ export default function Studio() {
         job: done, progress: progressOf(done), state: "done",
         message: `${saved ? `${fmtN(count)} rows saved to ${saved.filename}.` : `Done: ${fmtN(count)} rows are ready.`}${failed ? ` ${fmtN(failed)} item pages couldn't be read; their columns are empty.` : ""}${done.note ? ` ${done.note}` : ""}${leadSummary(done)}`,
       });
-      await deleteJob(done.id);
+      await keepJob(done); // stays in the history
     } catch (e) {
       if (jobAbort.current !== ac) return;
       if (ac.signal.aborted) {
@@ -618,7 +625,7 @@ export default function Studio() {
         setRun((r) => (r ? { ...r, state: "error", message: e instanceof Error ? e.message : String(e) } : r));
       }
     } finally {
-      void refreshResumable();
+      void refreshResumable(); // the history panel shows the new state
     }
   }
 
@@ -669,6 +676,7 @@ export default function Studio() {
       // Companies already looked up in a trial run are not looked up again.
       leads: cfg ? newLeadsState(cfg, leadPreview) : undefined,
       plan: plan ?? undefined,
+      request: plan?.request,
       // A limit without a country filter needs only the first pages (a little extra for repeated names).
       stopAfter: plan?.limit && !plan.country && scope === "feed" ? Math.ceil(plan.limit * 1.2) + 40 : undefined,
     });
@@ -940,6 +948,41 @@ export default function Studio() {
   // An export not shown on the current page (another site, or resumed from an earlier visit) lives in the banner, done ones included.
   const detachedRun = run && !runMatches;
 
+  // The history list: saved exports, with the live one (even a signed-in one, never saved) taking its place.
+  const jobViews: JobView[] = useMemo(() => {
+    const live = run?.job;
+    const saved = history.filter((j) => j.id !== live?.id);
+    const all = (live ? [live, ...saved] : saved).sort((a, b) => b.updatedAt - a.updatedAt);
+    return all.map((job) => {
+      if (live && job.id === live.id && run) {
+        const state = run.state === "stopped" ? "paused" : run.state;
+        return { job, state, progress: run.progress, message: run.message, live: true };
+      }
+      const state = job.stage === "done" ? "done" : job.stage === "ai" ? "waiting" : job.error ? "error" : "paused";
+      return { job, state, progress: progressOf(job), message: job.error, live: false };
+    });
+  }, [history, run]);
+  const viewed = viewId ? jobViews.find((v) => v.job.id === viewId) ?? null : null;
+
+  function downloadJob(j: Job, f: "xlsx" | "csv") {
+    void deliver({ ...j, format: f }).then(({ count, filename }) => say(`${fmtN(count)} rows saved to ${filename}`));
+  }
+  function resumeJob(j: Job) {
+    if (run?.state === "running" && run.job.id !== j.id) return say("Another export is running. Pause it first.");
+    if (j.leads) j.leads.aiWaitUntil = undefined;
+    void execute(j, { download: false });
+  }
+  async function removeJob(j: Job) {
+    if (run?.job.id === j.id) {
+      jobAbort.current?.abort();
+      jobAbort.current = null;
+      setRun(null);
+    }
+    if (viewId === j.id) setViewId(null);
+    await deleteJob(j.id);
+    void refreshResumable();
+  }
+
   const jobCard = (
     <JobBanner
       run={detachedRun ? run : null}
@@ -975,6 +1018,9 @@ export default function Studio() {
           </button>
         </form>
         <span className="spacer" />
+        <button type="button" className="btn btn-ghost" onClick={() => { setDockTab("exports"); setDockOpen(true); void refreshResumable(); }}>
+          <History size={15} aria-hidden="true" />History
+        </button>
         <button className="btn btn-ghost" popoverTarget="recipes">
           <Bookmark size={15} aria-hidden="true" />Recipes{recipes.length ? <span className="num" style={{ color: "var(--graphite-3)" }}>{recipes.length}</span> : null}
         </button>
@@ -1030,7 +1076,6 @@ export default function Studio() {
           </div>
         )}
       </header>
-      <AiUsageBar enabled={ai ? ai.enabled : null} models={ai?.models} />
 
       {(phase === "idle" || (chat.length > 0 && (phase === "scanning" || phase === "error"))) && (
         <ChatHome messages={chat} onSend={onChatSend} onAction={onChatAction} busy={phase === "scanning" || planning}>
@@ -1212,6 +1257,24 @@ export default function Studio() {
       )}
 
       <Recipes recipes={recipes} onRun={runRecipe} onDelete={(r) => setRecipes(deleteRecipe(r.id))} />
+      <Dock
+        open={dockOpen} setOpen={(v) => { setDockOpen(v); if (v) void refreshResumable(); }} tab={dockTab} setTab={setDockTab}
+        jobs={jobViews} ai={ai} aiError={aiError} testingAi={testingAi} onTestAi={() => void testAi()}
+        onOpen={(j) => setViewId(j.id)}
+        onDownload={downloadJob}
+        onResume={resumeJob}
+        onPause={() => jobAbort.current?.abort()}
+        onDelete={(j) => void removeJob(j)}
+      />
+      {viewed && (
+        <JobViewer
+          v={viewed}
+          onClose={() => setViewId(null)}
+          onDownload={(f) => downloadJob(viewed.job, f)}
+          onResume={() => resumeJob(viewed.job)}
+          onPause={() => jobAbort.current?.abort()}
+        />
+      )}
       {toast && <div className="toast" role="status"><Check size={15} aria-hidden="true" />{toast}</div>}
     </div>
   );

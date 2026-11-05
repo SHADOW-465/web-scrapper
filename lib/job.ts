@@ -27,6 +27,8 @@ export interface JobInput {
   crawl?: CrawlRequest;
   /** Signed in with a cookie or session: never written to disk. */
   gated?: boolean;
+  /** What she asked for in the chat, for the history list. */
+  request?: string;
   /** Look up each company's decision-makers after the rows (and item pages) are in. */
   leads?: LeadsState;
   /** A plain-words request: the file has exactly these columns (see lib/wishes.ts). */
@@ -179,13 +181,24 @@ async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBReq
  */
 export const saveJob = (job: Job) => (job.gated ? Promise.resolve(null) : tx("readwrite", (s) => s.put({ ...job, updatedAt: Date.now() })));
 export const deleteJob = (id: string) => tx("readwrite", (s) => s.delete(id));
+/** How many exports the history keeps (newest first), and for how long. */
+export const HISTORY_MAX = 25;
+const HISTORY_DAYS = 30;
+
+/** Every saved export, newest first: running, paused, waiting for AI and finished. Old ones are pruned. */
 export async function loadJobs(): Promise<Job[]> {
-  const all = ((await tx("readonly", (s) => s.getAll())) as Job[] | null) ?? [];
-  // Unfinished exports are kept a week; one waiting for AI across days is kept 30 days.
-  const keep = (j: Job) => j.updatedAt >= Date.now() - (j.stage === "ai" ? 30 : 7) * 24 * 3600 * 1000;
-  for (const j of all) if (!keep(j)) void deleteJob(j.id);
-  return all.filter((j) => !j.gated && keep(j)).sort((a, b) => b.updatedAt - a.updatedAt);
+  const all = (((await tx("readonly", (s) => s.getAll())) as Job[] | null) ?? []).sort((a, b) => b.updatedAt - a.updatedAt);
+  const cutoff = Date.now() - HISTORY_DAYS * 24 * 3600 * 1000;
+  const kept: Job[] = [];
+  for (const j of all) {
+    if (j.gated || j.updatedAt < cutoff || kept.length >= HISTORY_MAX) void deleteJob(j.id);
+    else kept.push(j);
+  }
+  return kept;
 }
+
+/** Save a finished export too, so it stays in the history (signed-in ones are never written). */
+export const keepJob = (job: Job) => saveJob(job);
 
 /* ------------------------------------------------------------ running */
 
