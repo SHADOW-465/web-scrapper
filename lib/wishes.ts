@@ -37,7 +37,7 @@ export interface Plan {
 
 type Kind = "company" | "website" | "country" | "city" | "hall" | "booth" | "email" | "phone" | "address" | "description" | "category" | "linkedin" | "person" | "other";
 export interface Wish { raw: string; label: string; kind: Kind; role?: Role | "any"; part?: Part; company?: boolean }
-export interface Request { wishes: Wish[]; limit: number | null; country: string | null; sources: boolean | null }
+export interface Request { wishes: Wish[]; limit: number | null; country: string | null; sources: boolean | null; all?: boolean }
 
 /* ------------------------------------------------------------ reading the request */
 
@@ -137,6 +137,12 @@ export function parseRequest(text: string): Request {
     if (w && !wishes.some((x) => x.label.toLowerCase() === w.label.toLowerCase())) wishes.push(w);
     if (wishes.length >= 15) break;
   }
+  // "Give me all the list of exhibitors": no field named, just the list itself. Take the list's useful columns.
+  const LIST_WORDS = /\b(all|every|full|complete|entire|whole|everything|list|liste|alle|gesamte?|exhibitors?|aussteller|companies|firmen|unternehmen|publishers?|verlage)\b/i;
+  const all = wishes.length === 1
+    ? (wishes[0].kind === "company" || wishes[0].kind === "other") && LIST_WORDS.test(wishes[0].label)
+    : !wishes.length && /\b(all|every|whole|complete|full|entire|alle|gesamte?)\b[^,;]*\b(list|liste|exhibitors?|aussteller|companies|firmen|unternehmen|publishers?|verlage)\b/i.test(text);
+  if (all) return { wishes: [], limit, country, sources, all: true };
   return { wishes, limit, country, sources };
 }
 
@@ -235,6 +241,18 @@ export function resolvePlan(req: Request, avail: Available[], prev?: Plan): Plan
     }
     if (source) items.push({ label: w.label, source });
     else unresolved.push(w.label);
+  }
+  if (req.all && !req.wishes.length) {
+    // The whole list: the usual directory columns this list really has, in a familiar order.
+    const usual: Array<[string, Kind]> = [["Company", "company"], ["Country", "country"], ["City", "city"], ["Hall", "hall"], ["Stand", "booth"],
+      ["Website", "website"], ["Email", "email"], ["Phone", "phone"], ["Address", "address"], ["Category", "category"], ["Description", "description"]];
+    const used = new Set<string>();
+    for (const [label, kind] of usual) {
+      const a = bestColumn({ raw: "", label, kind }, avail);
+      if (!a || used.has(a.id)) continue;
+      used.add(a.id);
+      items.push({ label, source: col(a) });
+    }
   }
   const companyCol = bestColumn({ raw: "", label: "company name", kind: "company" }, avail.filter((a) => !a.extra));
   const countryCol = bestColumn({ raw: "", label: "country", kind: "country" }, avail);

@@ -6,7 +6,7 @@ import { hasAccess, accessToken } from "../lib/access";
 import { prepareItemHtml, extractStatic } from "../lib/items";
 import { detectPagination, findPagingCap, findTotal } from "../lib/records";
 import { pageRequest, type Replay } from "../lib/replay";
-import { parseRequest } from "../lib/wishes";
+import { parseRequest, resolvePlan } from "../lib/wishes";
 import { safeFetch } from "../lib/safe-fetch";
 import { crawlPages, scanPage, readItemBatch, HttpError } from "../lib/client-api";
 import { replayPages } from "../lib/replay";
@@ -132,6 +132,19 @@ try {
   assert.equal((pageRequest(gql, 3).body as { variables: { page: number; first: number } }).variables.page, 4);
   assert.equal(parseRequest("can you give me all the list of exhibitors?").limit, null);
   assert.equal(parseRequest("the first 50 exhibitors").limit, 50);
+  // "All the list of exhibitors" names no field: it means the list's usual columns, not a column called that.
+  const allReq = parseRequest("can you give me all the list of exhibitors?");
+  assert.equal(allReq.all, true);
+  assert.equal(allReq.wishes.length, 0);
+  const allPlan = resolvePlan(allReq, [
+    { id: "c1", name: "Exhibitor name", samples: ["2 Seas Literary Agency", "23 First"], on: true },
+    { id: "c2", name: "Country name", samples: ["United States", "Australia"], on: true },
+    { id: "c3", name: "Email", samples: ["contact@2seasagency.com"], on: true },
+    { id: "c4", name: "Stand reference", samples: ["N.G30S"], on: true },
+    { id: "c5", name: "Organisation guid", samples: ["org-10b0"], on: true },
+  ]);
+  assert.deepEqual(allPlan.items.map((i) => i.label), ["Company", "Country", "Stand", "Email"]);
+  assert.equal(parseRequest("company, CEO name, email").all, undefined);
   console.log("pass algolia params-string pagination, nbHits, and nested body pages");
 
   process.env.APP_PASSWORD = "test-only";

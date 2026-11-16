@@ -1223,7 +1223,7 @@ export default function Studio() {
                 {busy && runMatches && p ? (
                   <div className="progress" aria-live="polite">
                     <div className="ptext">
-                      <span>{p.label}…</span>
+                      <span>{/…/.test(p.label) ? p.label : `${p.label}…`}</span>
                       <span className="num">{fmtN(p.done)}{p.of ? ` / ${fmtN(p.of)}` : ""}{p.stage === "items" ? " pages" : p.stage === "people" ? " companies" : " rows"}</span>
                     </div>
                     <div className={`meter${p.of ? "" : " indeterminate"}`}><i style={{ transform: `scaleX(${pct / 100})` }} /></div>
@@ -1347,9 +1347,10 @@ function finishLine(job: Job): string {
   const fields = exportFields(job).filter((name) => !/source|confidence/i.test(name));
   const kind = /exhibitor|aussteller/i.test(`${job.title} ${job.request ?? ""}`) ? (n === 1 ? "exhibitor" : "exhibitors") : (n === 1 ? "row" : "rows");
   const pick = fields.slice(0, 4);
-  const listed = pick.length === 0 ? "" : pick.length === 1 ? pick[0] : `${pick.slice(0, -1).join(", ")} and ${pick[pick.length - 1]}`;
+  const low = pick.map((f) => f.toLowerCase());
+  const listed = low.length === 0 ? "" : low.length === 1 ? low[0] : `${low.slice(0, -1).join(", ")} and ${low[low.length - 1]}`;
   const emails = rows.filter((r) => Object.entries(r).some(([k, v]) => !/source|confidence/i.test(k) && String(v ?? "").includes("@"))).length;
-  return `Done — ${fmtN(n)} ${kind}${listed ? ` with ${listed}` : ""}.${emails ? ` ${fmtN(emails)} have an email.` : ""}`;
+  return `Done — ${fmtN(n)} ${kind}${listed ? ` with ${listed}` : ""}.${emails ? ` ${fmtN(emails)} ${emails === 1 ? "has" : "have"} an email.` : ""}`;
 }
 
 function ackLine(next: Plan): string {

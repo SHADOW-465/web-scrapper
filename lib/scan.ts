@@ -314,7 +314,9 @@ export async function scan(
         }
       }
       for (const set of findRecordSets(cap.payload)) {
-        const pagination = detectPagination(cap.url, body);
+        // A list inside one record (`hits.0.brands`) is not the paged dataset: its size is what it holds.
+        const insideRecord = /(^|\.)\d+\./.test(set.path) && !/^results\.\d+\.hits$/.test(set.path);
+        const pagination = insideRecord ? null : detectPagination(cap.url, body);
         const rows = sourceRows(set.records, !!pagination);
         if (rows.length < 2) continue;
         const signature = `${Object.keys(rows[0]).slice(0, 20).sort().join(",")}|${rows.length}|${JSON.stringify(rows[0]).slice(0, 200)}`;

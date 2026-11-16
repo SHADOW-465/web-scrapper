@@ -114,6 +114,7 @@ export async function* replayPages(
         }
       } catch (e) {
         if (e instanceof BlockedFetchError) throw e;
+        if (status === 200) status = 0; // a cut-off or garbled body: retry like a network drop
       }
       if (attempt >= 2 || (status && !RETRYABLE.has(status))) {
         throw new PageError(status ? `The site answered ${status} for page ${index + 1} of its data.` : `Page ${index + 1} of the site's data didn't arrive.`, index);

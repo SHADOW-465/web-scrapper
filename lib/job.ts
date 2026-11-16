@@ -384,6 +384,7 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
       }
       for (;;) {
         if (L.aiWaitUntil && L.aiWaitUntil > Date.now()) {
+          if (L.aiWaitUntil - Date.now() > 90_000) break; // long cooldown: finish as "waiting", resumed later
           await sleep(L.aiWaitUntil - Date.now(), signal);
         }
         L.aiWaitUntil = undefined;
@@ -415,6 +416,9 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           L.aiWaitUntil = Date.now() + waitS * 1000;
           await saveJob(job);
           report();
+          // A long cooldown ends this run as "waiting": the file is ready now and the rest fills in
+          // by itself later (Studio resumes waiting jobs). Short waits just pause here.
+          if (waitS > 90) break;
           await sleep(waitS * 1000, signal);
           L.aiWaitUntil = undefined;
         }
