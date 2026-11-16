@@ -937,6 +937,29 @@ export default function Studio() {
   const p = run?.progress;
   const pct = busy && p?.of ? Math.min(100, (p.done / p.of) * 100) : 0;
   const hasItemCols = onCols.some((c) => c.item);
+  const fetchedRows = runMatches && run
+    ? (run.job.scope === "feed" && run.job.feed?.paginated ? run.job.raw.length : rows.length)
+    : rows.length;
+  const listedTotal = (runMatches && run?.job.total) || (scope !== "page" ? feed?.total ?? null : null);
+  const fetchComplete = listedTotal == null || fetchedRows >= listedTotal;
+  const previewTotal = runMatches && run
+    ? (fetchComplete ? rows.length : Math.max(rows.length, listedTotal ?? rows.length))
+    : scope === "page"
+      ? rows.length
+      : Math.max(rows.length, feed?.total ?? expectedRows ?? rows.length);
+  const previewLabel = runMatches && run
+    ? (fetchComplete && run.state === "done" ? `all ${rows.length.toLocaleString()} rows` : `${fetchedRows.toLocaleString()} of ${(listedTotal ?? rows.length).toLocaleString()} fetched so far`)
+    : listedTotal != null && rows.length < listedTotal
+      ? `${rows.length.toLocaleString()} of ${listedTotal.toLocaleString()} fetched so far`
+      : plan
+        ? (needsLookup(plan) ? "this page; contact columns fill in as the file is built" : "this page, as your file will look")
+        : hasItemCols
+          ? "this page; extra columns fill in as the file is built"
+          : leadsOn
+            ? "this page; contact columns fill in as the file is built"
+            : scope === "page"
+              ? "this page"
+              : "this page, before the rest is fetched";
   const exportLabel =
     runMatches && (run?.state === "done" || run?.state === "waiting") ? `Download ${fmtN(rows.length)} rows` :
     plan ? `Get ${plan.limit ? `the first ${fmtN(plan.limit)}` : "all"}${plan.country ? ` from ${plan.country}` : ""}${needsLookup(plan) ? " + decision-makers" : ""}` :
@@ -1092,8 +1115,8 @@ export default function Studio() {
             <Preview
               columns={plan ? planColumns : ws ? [...ws.columns, ...leadColumns] : []}
               rows={rows}
-              total={runMatches && run?.state === "done" ? rows.length : plan ? (plan.limit ?? (plan.country ? rows.length : expectedRows ?? rows.length)) : scope === "page" ? rows.length : expectedRows ?? rows.length}
-              label={runMatches ? (run?.state === "done" ? "everything fetched" : "fetched so far") : plan ? (needsLookup(plan) ? "this page; decision-maker columns fill in for tried companies and when you export" : "this page, as your export will look") : hasItemCols ? "this page; item-page columns fill in when you export" : leadsOn ? "this page; decision-maker columns fill in when you export or try" : scope === "page" ? "this page" : loadedRaw > (feed?.rows.length ?? 0) ? "browsing the site's data; the export fetches everything" : "this page, before fetching the rest"}
+              total={previewTotal}
+              label={previewLabel}
               tableOnly={tableOnly}
               onToggleTableOnly={() => setTableOnly((v) => !v)}
               noListFound={noListFound}

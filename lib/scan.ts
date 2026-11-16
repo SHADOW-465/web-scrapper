@@ -15,7 +15,7 @@ import { parseHTML } from "linkedom";
 import { aiEnabled, extractRecords, nameFields, quotaNotice } from "./ai";
 import { passwordGuard, signIn, type Credentials } from "./login";
 import { extractorJs, launch, nudge, openPage } from "./browser";
-import { detectPagination, findRecordSets, findTotal, flatten, humanizeKey, isPlumbing, type Flat } from "./records";
+import { detectPagination, findRecordSets, findTotal, flatten, humanizeKey, isPlumbing, paginationKeyBody, type Flat } from "./records";
 import type { Replay } from "./replay";
 import { fetchHtml, safeFetch, UA } from "./safe-fetch";
 import { captureSnapshot, sanitizeStatic, wrapSnapshot } from "./snapshot";
@@ -96,11 +96,7 @@ function cookieHeaderFor(cookies: Array<{ name: string; value: string; domain: s
 function datasetKey(method: string, url: string, body: unknown, jsonPath: string, p: ReturnType<typeof detectPagination>): string {
   const u = new URL(url);
   if (p && p.style.startsWith("query")) u.searchParams.delete(p.key);
-  let b = body;
-  if (p && p.style.startsWith("body") && b && typeof b === "object") {
-    const { [p.key]: _drop, ...rest } = b as Record<string, unknown>;
-    b = rest;
-  }
+  const b = paginationKeyBody(body, p);
   return `${method} ${u.origin}${u.pathname}?${[...u.searchParams].sort().join("&")} ${JSON.stringify(b)} ${jsonPath}`;
 }
 

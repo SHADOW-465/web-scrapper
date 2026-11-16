@@ -5,7 +5,7 @@
  * headers, cookies). Re-sending it with the page number bumped gets every
  * remaining page without paying for a browser per page.
  */
-import { dig, findTotal, flatten, type Flat, type Pagination } from "./records";
+import { dig, findPagingCap, findTotal, flatten, setAt, type Flat, type Pagination } from "./records";
 import { BlockedFetchError, safeFetch } from "./safe-fetch";
 
 export interface Replay {
@@ -37,7 +37,15 @@ export function pageRequest(r: Replay, index: number): { url: string; body: unkn
   if (!p) return { url, body };
   const size = p.pageSize || 0;
   const value = p.style.endsWith("page") ? p.first + index : p.first + index * (size || 1);
-  if (p.style.startsWith("body")) {
+  if (p.style === "body_params_page") {
+    const current = dig(body, p.paramsPath);
+    const sp = new URLSearchParams(typeof current === "string" ? current : "");
+    sp.set("page", String(value));
+    sp.set("hitsPerPage", String(p.pageSize || 1000));
+    if (body && typeof body === "object") setAt(body, p.paramsPath, sp.toString());
+  } else if (p.style === "body_nested_page" || p.style === "body_nested_offset") {
+    if (body && typeof body === "object") setAt(body, p.path, value);
+  } else if (p.style.startsWith("body")) {
     body = { ...((body as object) ?? {}), [p.key]: value };
   } else {
     const u = new URL(url);
@@ -78,6 +86,7 @@ export async function* replayPages(
   let index = opts.startIndex ?? 0;
   let fetched = 0;
   let total: number | null = null;
+  let cap: number | null = null;
 
   while (true) {
     if (Date.now() >= opts.deadline) return;
@@ -97,6 +106,12 @@ export async function* replayPages(
           payload = await res.json();
           break;
         }
+        const text = await res.text().catch(() => "");
+        // Algolia answers 400 once offset passes paginationLimitedTo. Rows already in hand are the lot.
+        if (fetched > 0 && /paginationLimitedTo|can only fetch the \d+ hits/i.test(text)) {
+          yield { rows: [], total, done: true, nextIndex: index };
+          return;
+        }
       } catch (e) {
         if (e instanceof BlockedFetchError) throw e;
       }
@@ -109,6 +124,7 @@ export async function* replayPages(
     }
 
     total ??= findTotal(payload);
+    cap ??= findPagingCap(payload);
     const records = dig(payload, r.jsonPath);
     const rows = Array.isArray(records) ? records.filter((x) => x && typeof x === "object").map((x) => flatten(x)) : [];
     index += 1;
@@ -117,7 +133,9 @@ export async function* replayPages(
     const cappedRows = opts.maxRows && fetched > opts.maxRows ? rows.slice(0, rows.length - (fetched - opts.maxRows)) : rows;
     const shortPage = !!r.pagination?.pageSize && rows.length < r.pagination.pageSize;
     const reachedTotal = total != null && (r.pagination?.pageSize ?? rows.length) * index >= total;
-    const done = !r.pagination || !rows.length || shortPage || reachedTotal ||
+    // Past Algolia's paging cap the next request errors. Stop and let the UI say how many were listed.
+    const reachedCap = cap != null && fetched >= cap && (total == null || fetched < total);
+    const done = !r.pagination || !rows.length || shortPage || reachedTotal || reachedCap ||
       (!!opts.maxRows && fetched >= opts.maxRows) || index >= 2000;
 
     yield { rows: cappedRows, total, done, nextIndex: index };
@@ -138,6 +156,17 @@ export function selfCheck(): string {
   if (!pageRequest(q, 2).url.includes("pageNumber=3")) throw new Error("query page failed");
   const o: Replay = { ...r, body: { offset: 0, limit: 50 }, pagination: { style: "body_offset", key: "offset", pageSize: 50, first: 0 } };
   if ((pageRequest(o, 2).body as Record<string, number>).offset !== 100) throw new Error("offset failed");
+  const params = "query=&page=0&filters=recordType%3Aexhibitor&facetFilters=";
+  const alg: Replay = {
+    ...r, url: "https://x.algolia.net/1/indexes/prod/query", body: { params }, jsonPath: "hits",
+    pagination: { style: "body_params_page", key: "page", paramsPath: "params", limitKey: "hitsPerPage", pageSize: 1000, first: 0 },
+  };
+  const bumped = new URLSearchParams(String((pageRequest(alg, 2).body as { params: string }).params));
+  if (bumped.get("page") !== "2" || bumped.get("hitsPerPage") !== "1000" || !bumped.get("filters")) throw new Error("algolia params page failed");
+  if ((alg.body as { params: string }).params === (pageRequest(alg, 2).body as { params: string }).params) throw new Error("algolia replay mutated");
+  const nested: Replay = { ...r, body: { variables: { page: 1, first: 20 } }, pagination: { style: "body_nested_page", key: "page", path: "variables.page", pageSize: 20, first: 1 } };
+  const nv = (pageRequest(nested, 3).body as { variables: { page: number; first: number } }).variables;
+  if (nv.page !== 4 || nv.first !== 20) throw new Error("nested page failed");
   const h = cleanHeaders({ "Content-Length": "5", ":path": "/", "X-Auth": "k" });
   if (h["Content-Length"] || h[":path"] || h["X-Auth"] !== "k") throw new Error("header hygiene failed");
   return "replay ok";

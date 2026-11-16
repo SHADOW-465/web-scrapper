@@ -25,6 +25,8 @@ export default function JobViewer({ v, onClose, onDownload, onResume, onPause }:
     [job],
   );
   const s = jobStats(job);
+  const fetchedRows = job.scope === "feed" && job.feed?.paginated ? job.raw.length : rows.length;
+  const partialFetch = job.total != null && fetchedRows < job.total;
   const close = useRef<HTMLButtonElement>(null);
   // Focus starts on Close; Escape closes (handled on the dialog itself, and on the page for focus outside it).
   const closeRef = useRef(onClose);
@@ -67,7 +69,13 @@ export default function JobViewer({ v, onClose, onDownload, onResume, onPause }:
           </div>
         </header>
         <div className="viewer-table">
-          <Preview columns={columns} rows={rows} total={Math.max(rows.length, 0)} label={state === "done" ? "everything found" : "found so far"} tableOnly />
+          <Preview
+            columns={columns}
+            rows={rows}
+            total={partialFetch ? Math.max(rows.length, job.total ?? rows.length) : rows.length}
+            label={partialFetch ? `${fetchedRows.toLocaleString()} of ${(job.total ?? rows.length).toLocaleString()} fetched so far` : state === "done" ? `all ${rows.length.toLocaleString()} rows` : "fetched so far"}
+            tableOnly
+          />
         </div>
       </div>
     </div>

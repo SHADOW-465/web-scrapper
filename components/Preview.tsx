@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { cell } from "@/lib/exporters";
 import type { Column, DirectoryLink, Row } from "@/lib/model";
 
-const PAGE = 50;
+const PAGE_CHOICES = [50, 100, 250] as const;
 
 export default function Preview({
   columns,
@@ -39,21 +39,23 @@ export default function Preview({
 }) {
   const [open, setOpen] = useState(true);
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<number>(50);
   const [loading, setLoading] = useState(false);
   const isOpen = open || !!tableOnly;
   const on = columns.filter((c) => c.on);
-  const effectiveTotal = Math.max(rows.length, total);
-  const pages = Math.max(1, Math.ceil(effectiveTotal / PAGE));
-  const last = Math.max(0, Math.ceil(rows.length / PAGE) - 1);
+  const size = pageSize > 0 ? pageSize : Math.max(rows.length, 1);
+  const listed = Math.max(rows.length, total);
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  const last = Math.max(0, pages - 1);
   // Stay on a page that exists (a new dataset or a shorter table moves back).
   useEffect(() => {
     if (page > last && !loading) setPage(last);
   }, [page, last, loading]);
-  const from = page * PAGE;
-  const slice = rows.slice(from, from + PAGE);
-  const hasNext = from + PAGE < rows.length || !!canLoadMore;
+  const from = page * size;
+  const slice = rows.slice(from, from + size);
+  const hasNext = from + size < rows.length || !!canLoadMore;
   const next = async () => {
-    if (from + PAGE < rows.length) return setPage(page + 1);
+    if (from + size < rows.length) return setPage(page + 1);
     if (!canLoadMore || !onLoadMore) return;
     setLoading(true);
     try {
@@ -66,7 +68,7 @@ export default function Preview({
   const shown = slice.length;
   // A page is never shown half-empty while the site has more: fill it first, so no rows are skipped.
   useEffect(() => {
-    if (slice.length >= PAGE || !canLoadMore || !onLoadMore || loading || !on.length) return;
+    if (slice.length >= size || !canLoadMore || !onLoadMore || loading || !on.length || pageSize === 0) return;
     let live = true;
     setLoading(true);
     void Promise.resolve(onLoadMore()).finally(() => live && setLoading(false));
@@ -82,10 +84,10 @@ export default function Preview({
           {noListFound ? (
             "No company list found on this page"
           ) : rows.length ? (
-            shown === effectiveTotal ? (
-              <><span className="num">{effectiveTotal.toLocaleString()}</span> {effectiveTotal === 1 ? "row" : "rows"}</>
+            shown === listed && pageSize === 0 ? (
+              <><span className="num">{listed.toLocaleString()}</span> {listed === 1 ? "row" : "rows"}</>
             ) : (
-              <>rows <span className="num">{(from + 1).toLocaleString()}–{(from + shown).toLocaleString()}</span> of <span className="num">{effectiveTotal.toLocaleString()}</span></>
+              <>rows <span className="num">{(from + 1).toLocaleString()}–{(from + shown).toLocaleString()}</span> of <span className="num">{listed.toLocaleString()}</span></>
             )
           ) : (
             "No rows yet"
@@ -183,11 +185,26 @@ export default function Preview({
               </tbody>
             </table>
           )}
-          {!noListFound && on.length > 0 && (pages > 1 || hasNext) && (
+          {!noListFound && on.length > 0 && rows.length > 0 && (
             <nav className="pager" aria-label="Table pages">
+              <label className="pageinfo">
+                Show
+                <select
+                  className="mini"
+                  value={pageSize}
+                  aria-label="Rows on each page"
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setPage(0);
+                  }}
+                >
+                  {PAGE_CHOICES.map((n) => <option key={n} value={n}>{n}</option>)}
+                  <option value={0}>All</option>
+                </select>
+              </label>
               <button type="button" className="btn btn-quiet btn-sm" onClick={() => setPage(0)} disabled={page === 0 || loading} aria-label="First page"><ChevronsLeft size={14} aria-hidden="true" /></button>
               <button type="button" className="btn btn-quiet btn-sm" onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0 || loading}><ChevronLeft size={14} aria-hidden="true" />Prev</button>
-              <span className="pageinfo">Page <b className="num">{(page + 1).toLocaleString()}</b> of <span className="num">{pages.toLocaleString()}</span>{rows.length < effectiveTotal ? <> · <span className="num">{rows.length.toLocaleString()}</span> loaded</> : null}</span>
+              <span className="pageinfo">Page <b className="num">{(page + 1).toLocaleString()}</b> of <span className="num">{pages.toLocaleString()}</span>{rows.length < listed ? <> · <span className="num">{rows.length.toLocaleString()}</span> loaded</> : null}</span>
               <button type="button" className="btn btn-quiet btn-sm" onClick={() => void next()} disabled={!hasNext || loading}>
                 {loading ? <Loader2 size={14} className="spin" aria-hidden="true" /> : null}Next<ChevronRight size={14} aria-hidden="true" />
               </button>

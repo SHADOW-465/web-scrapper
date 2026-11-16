@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { scan } from "../lib/scan";
 import { hasAccess, accessToken } from "../lib/access";
 import { prepareItemHtml, extractStatic } from "../lib/items";
-import { findTotal } from "../lib/records";
+import { detectPagination, findPagingCap, findTotal } from "../lib/records";
+import { pageRequest, type Replay } from "../lib/replay";
+import { parseRequest } from "../lib/wishes";
 import { safeFetch } from "../lib/safe-fetch";
 import { crawlPages, scanPage, readItemBatch, HttpError } from "../lib/client-api";
 import { replayPages } from "../lib/replay";
@@ -38,6 +40,43 @@ try {
   assert.equal(findTotal({count:36,data:{total:4130}}),4130);
   assert.equal(findTotal({count:36,data:{total:0}}),0);
   console.log("pass dataset totals take precedence over page counts");
+
+  const algoliaUrl = "https://xd0u5m6y4r-dsn.algolia.net/1/indexes/prod_exhibitor/query?x-algolia-agent=test&x-algolia-application-id=APP&x-algolia-api-key=search";
+  const params = "query=&page=0&filters=recordType%3Aexhibitor%20AND%20locale%3Aen-gb%20AND%20eventEditionId%3Aeve-1&facetFilters=&optionalFilters=%5B%5D";
+  const algolia = detectPagination(algoliaUrl, { params });
+  assert.equal(algolia?.style, "body_params_page");
+  assert.equal(algolia && "first" in algolia ? algolia.first : null, 0);
+  assert.equal(algolia?.pageSize, 1000);
+  const missingPage = detectPagination(algoliaUrl, { params: "query=&filters=recordType%3Aexhibitor" });
+  assert.equal(missingPage?.style, "body_params_page");
+  assert.equal(missingPage && "first" in missingPage ? missingPage.first : null, 0);
+  const multi = detectPagination(algoliaUrl, { requests: [{ indexName: "prod", params: "query=&page=0&filters=recordType%3Aexhibitor" }] });
+  assert.equal(multi?.style, "body_params_page");
+  assert.equal(multi && multi.style === "body_params_page" ? multi.paramsPath : "", "requests.0.params");
+  assert.equal(findTotal({ hits: [{ name: "A" }, { name: "B" }], nbHits: 1043, nbPages: 11, hitsPerPage: 100, page: 0 }), 1043);
+  assert.equal(findTotal({ results: [{ hits: [], nbHits: 980, nbPages: 1 }] }), 980);
+  assert.equal(findPagingCap({ nbHits: 1500, paginationLimitedTo: 1000 }), 1000);
+  assert.equal(detectPagination("https://event.buchmesse.de/api", { page: 1, limit: 36 })?.style, "body_page");
+  const nested = detectPagination("https://x.test/gql", { query: "query", variables: { page: 1, first: 24 } });
+  assert.equal(nested?.style, "body_nested_page");
+  assert.equal(nested && nested.style === "body_nested_page" ? nested.path : "", "variables.page");
+  const nestedFrom = detectPagination("https://x.test/search", { query: { from: 0, size: 50 } });
+  assert.equal(nestedFrom?.style, "body_nested_offset");
+  assert.ok(algolia && algolia.style === "body_params_page");
+  const replay: Replay = {
+    url: algoliaUrl, method: "POST", headers: {}, body: { params }, jsonPath: "hits", pagination: algolia,
+  };
+  const page2 = new URLSearchParams(String((pageRequest(replay, 2).body as { params: string }).params));
+  assert.equal(page2.get("page"), "2");
+  assert.equal(page2.get("hitsPerPage"), "1000");
+  assert.match(page2.get("filters") ?? "", /recordType:exhibitor/);
+  assert.equal(new URLSearchParams(params).get("hitsPerPage"), null);
+  assert.ok(nested && nested.style === "body_nested_page");
+  const gql: Replay = { url: "https://x.test/gql", method: "POST", headers: {}, body: { query: "query", variables: { page: 1, first: 24 } }, jsonPath: "data.items", pagination: nested };
+  assert.equal((pageRequest(gql, 3).body as { variables: { page: number; first: number } }).variables.page, 4);
+  assert.equal(parseRequest("can you give me all the list of exhibitors?").limit, null);
+  assert.equal(parseRequest("the first 50 exhibitors").limit, 50);
+  console.log("pass algolia params-string pagination, nbHits, and nested body pages");
 
   process.env.APP_PASSWORD = "test-only";
   assert.equal(hasAccess(new Request("https://app.test", {headers:{cookie:"ss_access=%ZZ"}})),false);
