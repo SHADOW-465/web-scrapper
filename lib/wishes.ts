@@ -327,13 +327,13 @@ export function planHeaders(plan: Plan): string[] {
 }
 
 const CONF: Record<string, string> = { high: "High", medium: "Medium", low: "Low" };
-const conf = (p: Person) => `${CONF[p.confidence] ?? p.confidence}${p.sourceKind === "ai" ? " (read by AI)" : ""}`;
+const conf = (p: Person) => CONF[p.confidence] ?? p.confidence;
 const VIA: Record<string, [string, string]> = {
   listing: ["Listed in the directory", "High"],
   "exhibitor-page": ["Exhibitor page", "High"],
-  "domain-check": ["Name match, check", "Medium"],
-  "web-search": ["Web search, check", "Medium"],
-  "ai-search": ["AI web search, check", "Medium"],
+  "domain-check": ["Company website", "Medium"],
+  "web-search": ["Web search", "Medium"],
+  "ai-search": ["Web search", "Medium"],
 };
 
 /** One cell: value, where it came from, how sure. Empty value = not found. */

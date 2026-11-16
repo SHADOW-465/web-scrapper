@@ -123,7 +123,7 @@ export function ListsFound(props: {
                 </span>
                 <span className="badge badge-feed">
                   {f.ai ? <Sparkles size={11} aria-hidden="true" /> : <Database size={11} aria-hidden="true" />}
-                  {f.ai ? "Read by AI" : f.total ? <><span className="num">{fmt(f.total)}</span> total</> : f.paginated ? "all pages" : "Full list"}
+                  {f.ai ? "Read from the page" : f.total ? <><span className="num">{fmt(f.total)}</span> total</> : f.paginated ? "all pages" : "Full list"}
                 </span>
               </span>
             </button>

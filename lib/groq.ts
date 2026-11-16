@@ -4,12 +4,13 @@
  *   GROQ_API_KEY         Groq (first choice; the only one with free web search)
  *   GROQ_MODEL           primary   (default openai/gpt-oss-20b)
  *   GROQ_FALLBACK_MODEL  fallback  (default openai/gpt-oss-120b)
+ *   GROQ_MODELS          optional comma-separated list; when set, replaces the list above
  *   OPENROUTER_API_KEY   OpenRouter free models, used when Groq is limited or failing (JSON tasks only:
  *                        OpenRouter's web search costs money even on free models)
  *   OPENROUTER_MODELS    comma-separated (default google/gemma-4-31b-it:free,openrouter/free)
  *
- * Rate limits are never hidden: a 429 that cannot be waited out is thrown as
- * AiQuotaError and shown to the user, with the time until the limit resets.
+ * A full cooldown is AiQuotaError with retryAfter seconds. The message is the
+ * single word "busy" — callers wait and retry, and never show it.
  */
 import { scrub } from "./redact";
 
@@ -22,11 +23,19 @@ const MAX_WAIT_S = 20; // wait this long for a per-minute limit; anything longer
 export type Provider = "groq" | "openrouter";
 export interface Candidate { provider: Provider; model: string }
 
-/** Groq's models (their free daily tokens are what the "AI left today" bar measures). */
-export const models = () => (process.env.GROQ_API_KEY ? [
-  process.env.GROQ_MODEL || "openai/gpt-oss-20b",
-  process.env.GROQ_FALLBACK_MODEL || "openai/gpt-oss-120b",
-].filter((m, i, a) => a.indexOf(m) === i) : []);
+const EXTRA_GROQ = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
+
+/** Groq models, in order. `GROQ_MODELS` replaces the built-in list when it is set. */
+export const models = () => {
+  if (!process.env.GROQ_API_KEY) return [];
+  const listed = (process.env.GROQ_MODELS || "").split(",").map((m) => m.trim()).filter(Boolean);
+  if (listed.length) return [...new Set(listed)];
+  return [...new Set([
+    process.env.GROQ_MODEL || "openai/gpt-oss-20b",
+    process.env.GROQ_FALLBACK_MODEL || "openai/gpt-oss-120b",
+    ...EXTRA_GROQ,
+  ])];
+};
 export const openrouterModels = () => (process.env.OPENROUTER_API_KEY
   ? (process.env.OPENROUTER_MODELS || "google/gemma-4-31b-it:free,openrouter/free").split(",").map((m) => m.trim()).filter(Boolean)
   : []);
@@ -43,13 +52,19 @@ export function candidates(search = false): Candidate[] {
 }
 const label = (c: Candidate) => `${c.provider === "groq" ? "Groq" : "OpenRouter"} ${c.model}`;
 
+/** Every configured model is cooling down. `retryAfter` is seconds. `message` is never shown. */
 export class AiQuotaError extends Error {
-  constructor(public scope: "day" | "minute", public resetInSeconds: number, who = "Groq") {
-    const when = resetInSeconds >= 3600 ? `about ${Math.ceil(resetInSeconds / 3600)} h` : resetInSeconds >= 90 ? `about ${Math.ceil(resetInSeconds / 60)} min` : `${Math.max(1, Math.ceil(resetInSeconds))} s`;
-    super(`The free ${scope === "day" ? "daily" : "per-minute"} AI limit is used up on ${who} (HTTP 429). It resets in ${when}; until then, lookups carry on without AI and the rest waits for AI.`);
+  readonly busy = true as const;
+  constructor(public scope: "day" | "minute", public resetInSeconds: number, _who = "") {
+    super("busy");
     this.name = "AiQuotaError";
   }
+  get retryAfter() {
+    return this.resetInSeconds;
+  }
 }
+
+export type LlmResult<T> = { ok: true; value: T } | { ok: false; busy: true; retryAfter: number } | { ok: false; busy: false };
 export class AiError extends Error {
   constructor(message: string) {
     super(scrub(message, [process.env.GROQ_API_KEY]));
@@ -74,6 +89,31 @@ export const latestLimits = () => Object.fromEntries(limits);
 
 const blockedUntil = new Map<string, { until: number; scope: "day" | "minute" }>();
 const cache = new Map<string, { at: number; value: unknown }>();
+const MAX_IN_FLIGHT = 3;
+let inFlight = 0;
+const slotQueue: Array<() => void> = [];
+function acquire(): Promise<void> {
+  if (inFlight < MAX_IN_FLIGHT) {
+    inFlight++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => slotQueue.push(() => {
+    inFlight++;
+    resolve();
+  }));
+}
+function release() {
+  inFlight = Math.max(0, inFlight - 1);
+  slotQueue.shift()?.();
+}
+async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
+  await acquire();
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
 const usage = { requests: 0, tokens: 0, cached: 0, orRequests: 0 };
 let notice: AiQuotaError | null = null;
 
@@ -81,7 +121,7 @@ let notice: AiQuotaError | null = null;
 export function takeUsage() {
   const out = {
     ...usage,
-    quota: notice ? { scope: notice.scope, resetInSeconds: notice.resetInSeconds, message: notice.message } : undefined,
+    quota: notice ? { scope: notice.scope, resetInSeconds: notice.resetInSeconds } : undefined,
     limits: latestLimits(), models: models(),
     openrouter: openrouterModels().length ? { models: openrouterModels(), requests: usage.orRequests } : undefined,
   };
@@ -100,6 +140,8 @@ export function __setTransport(f?: FetchFn, s?: (ms: number) => Promise<void>) {
   blockedUntil.clear();
   limits.clear();
   cache.clear();
+  inFlight = 0;
+  slotQueue.length = 0;
   notice = null;
   usage.requests = usage.tokens = usage.cached = usage.orRequests = 0;
 }
@@ -240,13 +282,23 @@ function parseJson(text: string): unknown {
 }
 
 /**
- * Ask for a JSON object. Tries the primary model, then the fallback.
- * Throws AiQuotaError when every model is rate-limited, AiError for other failures.
+ * Ask for a JSON object. Tries each configured model.
+ * Throws AiQuotaError when every model is cooling down, AiError for other failures.
  */
 export async function groqJson<T = unknown>(kind: string, system: string, user: string, opts: GroqOptions<T> = {}): Promise<T> {
   const r = await run(kind, system, user, opts, { json: true });
   lastAnswer = r.model;
   return r.value as T;
+}
+
+/** Same call, as a result. Busy carries retryAfter and no sentence. */
+export async function llmJson<T = unknown>(kind: string, system: string, user: string, opts: GroqOptions<T> = {}): Promise<LlmResult<T>> {
+  try {
+    return { ok: true, value: await groqJson<T>(kind, system, user, opts) };
+  } catch (e) {
+    if (e instanceof AiQuotaError) return { ok: false, busy: true, retryAfter: e.retryAfter };
+    return { ok: false, busy: false };
+  }
 }
 let lastAnswer = "";
 /** Which provider and model gave the last JSON answer ("Groq openai/gpt-oss-20b", "OpenRouter …", "cache"). */
@@ -283,45 +335,39 @@ async function run<T>(kind: string, system: string, user: string, opts: GroqOpti
       if (!quota || left < quota.resetInSeconds || (quota.scope === "day" && blocked.scope === "minute")) quota = new AiQuotaError(blocked.scope, left);
       continue;
     }
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const r = await call(cand, system, user, maxTokens, true, shape);
-      if (r.ok) {
-        try {
-          const value = shape.json ? parseJson(r.text) : r.text.trim();
-          if (!shape.json && !value) throw new Error("empty");
-          if (opts.validate && !opts.validate(value)) throw new Error("invalid shape");
-          cache.set(ck, { at: Date.now(), value });
-          if (cache.size > 200) cache.delete(cache.keys().next().value as string);
-          notice = null;
-          return { value, model: `${label(cand)}`, tokens: r.tokens };
-        } catch {
-          lastError = `${label(cand)} returned output that was not usable`;
-          break; // next model
-        }
+    const r = await withSlot(() => call(cand, system, user, maxTokens, true, shape));
+    if (r.ok) {
+      try {
+        const value = shape.json ? parseJson(r.text) : r.text.trim();
+        if (!shape.json && !value) throw new Error("empty");
+        if (opts.validate && !opts.validate(value)) throw new Error("invalid shape");
+        cache.set(ck, { at: Date.now(), value });
+        if (cache.size > 200) cache.delete(cache.keys().next().value as string);
+        notice = null;
+        return { value, model: `${label(cand)}`, tokens: r.tokens };
+      } catch {
+        lastError = "unusable";
+        continue;
       }
-      if (r.kind === "quota") {
-        if (r.scope === "minute" && r.wait <= MAX_WAIT_S && attempt === 0) {
-          await sleepFn(Math.ceil(r.wait * 1000) + 250);
-          continue; // same model, once
-        }
-        blockedUntil.set(model, { until: Date.now() + r.wait * 1000, scope: r.scope });
-        // Keep the soonest reset: AI is back as soon as any one model is.
-        if (!quota || r.wait < quota.resetInSeconds || (quota.scope === "day" && r.scope === "minute")) quota = new AiQuotaError(r.scope, r.wait);
-        break; // next model
-      }
-      lastError = r.message;
-      break;
     }
+    if (r.kind === "quota") {
+      const wait = r.wait + Math.random() * 0.35;
+      blockedUntil.set(model, { until: Date.now() + wait * 1000, scope: r.scope });
+      if (!quota || r.wait < quota.resetInSeconds || (quota.scope === "day" && r.scope === "minute")) quota = new AiQuotaError(r.scope, r.wait);
+      continue;
+    }
+    if (r.kind === "error" && /timeout|timed out|HTTP 5|Could not reach|ECONN|network|fetch failed/i.test(r.message)) {
+      blockedUntil.set(model, { until: Date.now() + 1500 + Math.random() * 500, scope: "minute" });
+      lastError = "unusable";
+      continue;
+    }
+    lastError = "unusable";
   }
   if (quota) {
-    // Name the providers that are actually used up (web search only ever uses Groq).
-    const tried = candidates(shape.search).map((c) => c.provider);
-    const who = tried.includes("groq") && tried.includes("openrouter") ? "Groq and OpenRouter" : tried.includes("openrouter") ? "OpenRouter" : "Groq";
-    quota = new AiQuotaError(quota.scope, quota.resetInSeconds, who);
     notice = quota;
     throw quota;
   }
-  throw new AiError(lastError || "The AI did not return a usable answer.");
+  throw new AiError(lastError || "no usable answer");
 }
 
 export async function selfCheckAsync(): Promise<string> {
@@ -329,6 +375,7 @@ export async function selfCheckAsync(): Promise<string> {
     if (a !== b) throw new Error(`groq: ${m}: ${String(a)} != ${String(b)}`);
   };
   process.env.GROQ_API_KEY = "gsk_testtesttesttest1234";
+  process.env.GROQ_MODELS = "openai/gpt-oss-20b,openai/gpt-oss-120b";
   const ok = (content: unknown, tokens = 50) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }], usage: { total_tokens: tokens } }), { status: 200 });
   const limited = (msg: string, retry: string) => new Response(JSON.stringify({ error: { message: msg } }), { status: 429, headers: { "retry-after": retry } });
   const seen: string[] = [];
@@ -345,12 +392,14 @@ export async function selfCheckAsync(): Promise<string> {
   eq(JSON.stringify(await groqJson("t", "s", "u1")), '{"a":1}', "fallback result");
   eq(seen.join(","), "openai/gpt-oss-20b,openai/gpt-oss-120b", "fallback order");
 
-  // per-minute limit: waits and retries the same model once
+  // per-minute limit on the first model: rotate, do not surface a sentence
   __setTransport(fake, noSleep);
   seen.length = 0;
   queue = [() => limited("requests per minute", "3"), () => ok({ b: 2 })];
-  eq(JSON.stringify(await groqJson("t", "s", "u2")), '{"b":2}', "retry result");
-  eq(seen.join(","), "openai/gpt-oss-20b,openai/gpt-oss-20b", "same model retried");
+  const rotated = await llmJson("t", "s", "u2");
+  eq(rotated.ok, true, "rotated result ok");
+  eq(JSON.stringify(rotated), '{"ok":true,"value":{"b":2}}', "rotated result has no provider text");
+  eq(seen.join(","), "openai/gpt-oss-20b,openai/gpt-oss-120b", "minute limit rotates to the next model");
 
   // both exhausted -> AiQuotaError, visible, key never in message
   __setTransport(fake, noSleep);
@@ -363,8 +412,11 @@ export async function selfCheckAsync(): Promise<string> {
   }
   eq(err instanceof AiQuotaError, true, "quota error thrown");
   eq((err as AiQuotaError).scope, "day", "quota scope");
+  eq((err as Error).message, "busy", "no user-facing sentence");
   eq(/gsk_/.test((err as Error).message), false, "no key in message");
-  eq(!!quotaNotice(), true, "notice recorded for the UI");
+  const busy = await llmJson("t", "s", "u3b");
+  eq(busy.ok === false && busy.busy === true && busy.retryAfter > 0, true, "all-busy is a typed result");
+  eq(/429|groq|openrouter|quota|limit|http/i.test(JSON.stringify(busy)), false, "busy result has no provider text");
 
   // bad JSON on primary -> fallback
   __setTransport(fake, noSleep);
@@ -427,9 +479,17 @@ export async function selfCheckAsync(): Promise<string> {
   eq(all instanceof AiQuotaError && (all as AiQuotaError).scope === "day" && (all as AiQuotaError).resetInSeconds <= 3601, true, "all providers used up -> soonest reset");
   eq(/sk-or-v1/.test(String((all as Error).message)), false, "OpenRouter key never in a message");
   delete process.env.OPENROUTER_API_KEY;
+  delete process.env.GROQ_MODELS;
+  __setTransport(fake, noSleep);
+  seen.length = 0;
+  queue = [() => limited("tokens per day (TPD)", "30"), () => limited("tokens per day (TPD)", "30"), () => ok({ llama: 1 })];
+  eq(JSON.stringify(await groqJson("t", "s", "u7")), '{"llama":1}', "extra groq model answers");
+  eq(seen[2], "llama-3.3-70b-versatile", "default chain includes llama");
+  process.env.GROQ_MODELS = "openai/gpt-oss-20b,openai/gpt-oss-120b";
 
   eq(parseDuration("2m59.56s"), 179.56, "duration");
   __setTransport();
   delete process.env.GROQ_API_KEY;
+  delete process.env.GROQ_MODELS;
   return "groq ok (fallback, retry, quota, bad json, cache, search, limits, openrouter)";
 }

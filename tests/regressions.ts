@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { scan } from "../lib/scan";
 import { hasAccess, accessToken } from "../lib/access";
 import { prepareItemHtml, extractStatic } from "../lib/items";
@@ -11,6 +13,60 @@ import { replayPages } from "../lib/replay";
 import { newJob, runJob } from "../lib/job";
 import { openFeedWorkspace, type PageList } from "../lib/model";
 import { urlsFor } from "../lib/items-client";
+
+/** Static prose in a component: string literals and JSX text, without code inside ${}. */
+function staticCopy(src: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  const skipString = (q: string) => {
+    i++;
+    while (i < src.length && src[i] !== q) {
+      if (src[i] === "\\") i++;
+      i++;
+    }
+    i++;
+  };
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '"' || c === "'") {
+      const q = c;
+      const start = i + 1;
+      skipString(q);
+      out.push(src.slice(start, i - 1).replace(/\\n/g, "\n"));
+      continue;
+    }
+    if (c === "`") {
+      i++;
+      let body = "";
+      while (i < src.length) {
+        if (src[i] === "\\") { body += src[i + 1] ?? ""; i += 2; continue; }
+        if (src[i] === "`") { out.push(body); i++; break; }
+        if (src[i] === "$" && src[i + 1] === "{") {
+          out.push(body);
+          body = "";
+          i += 2;
+          let depth = 1;
+          while (i < src.length && depth) {
+            if (src[i] === '"' || src[i] === "'" || src[i] === "`") skipString(src[i]);
+            else {
+              if (src[i] === "{") depth++;
+              else if (src[i] === "}") depth--;
+              i++;
+            }
+          }
+          continue;
+        }
+        body += src[i++];
+      }
+      continue;
+    }
+    i++;
+  }
+  const jsx = />([^<>{}]+)</g;
+  let m: RegExpExecArray | null;
+  while ((m = jsx.exec(src))) out.push(m[1]);
+  return out;
+}
 
 const nativeFetch = globalThis.fetch;
 const originalPassword = process.env.APP_PASSWORD;
@@ -117,6 +173,39 @@ try {
   globalThis.fetch = async () => new Response('{"type":"done","pending":["https://8.8.8.8/item"]}\n');
   await assert.rejects(readItemBatch({scanUrl:"https://8.8.8.8/",urls:["https://8.8.8.8/item"],spec:{fields:[],lists:[],mode:"static"}}),/No item pages were read/);
   console.log("pass stalled exports stop with their resume position instead of looping forever");
+
+  const banned = [
+    /\bAI\b/,
+    /\bGroq\b/i,
+    /\bOpenRouter\b/i,
+    /gpt-oss/i,
+    /\bgemma\b/i,
+    /\bllama\b/i,
+    /\bHTTP\b/,
+    /\b429\b/,
+    /rate limit/i,
+    /\blimits?\b/i,
+    /\bquota\b/i,
+    /\breset\b/i,
+    /\btokens?\b/i,
+    /\brequests\b/i,
+  ];
+  const hits: string[] = [];
+  for (const name of readdirSync("components")) {
+    if (!name.endsWith(".tsx")) continue;
+    const src = readFileSync(join("components", name), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+    const bits = staticCopy(src);
+    for (const bit of bits) {
+      const text = bit.replace(/https?:\/\/\S+/g, " ");
+      if (!/\s/.test(text)) continue;
+      const hit = banned.find((b) => b.test(text));
+      if (hit) hits.push(`${name}: ${hit} in ${JSON.stringify(text.slice(0, 180))}`);
+    }
+  }
+  assert.deepEqual(hits, [], "client copy");
+  console.log("pass client copy has no provider or quota wording");
 } finally {
   globalThis.fetch = nativeFetch;
   if (originalPassword === undefined) delete process.env.APP_PASSWORD;

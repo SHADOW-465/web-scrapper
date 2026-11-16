@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Bot, Check, ChevronRight, Loader2, Sparkles, UserSearch } from "lucide-react";
+import { AlertTriangle, Loader2, Sparkles, UserSearch } from "lucide-react";
 import type { AiStatus } from "@/lib/client-api";
 import { estimateSeconds, type LeadsConfig, type LeadsState } from "@/lib/leads";
 
@@ -12,7 +12,7 @@ const duration = (secs: number) => {
   return mins < 90 ? `about ${mins} minutes` : `about ${Math.round(mins / 6) / 10} hours`;
 };
 
-/** "Find decision-makers": settings, an AI check, and a small trial run before the full export. */
+/** Decision-makers: settings and a small trial before the full export. */
 export function LeadsPanel(props: {
   config: LeadsConfig | null;
   setConfig: (c: LeadsConfig) => void;
@@ -32,11 +32,10 @@ export function LeadsPanel(props: {
   run: LeadsState | null;
   busy: boolean;
 }) {
-  const { config: cfg, setConfig, columns, companies, ai } = props;
+  const { config: cfg, setConfig, columns, companies } = props;
   if (!cfg) return null;
   const set = (patch: Partial<LeadsConfig>) => setConfig({ ...cfg, ...patch });
   const count = companies == null ? null : cfg.limit ? Math.min(cfg.limit, companies) : companies;
-  const limits = ai?.limits ? Object.entries(ai.limits)[0] : undefined;
 
   return (
     <section className="section leads" aria-labelledby="leads-h">
@@ -65,9 +64,9 @@ export function LeadsPanel(props: {
               <option value="">(none)</option>
               {columns.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
-            <label htmlFor="lead-limit">Companies</label>
+            <label htmlFor="lead-count">Companies</label>
             <div className="limitrow">
-              <select id="lead-limit" value={cfg.limit ? "some" : "all"} onChange={(e) => set({ limit: e.target.value === "all" ? null : cfg.limit || 25 })}>
+              <select id="lead-count" value={cfg.limit ? "some" : "all"} onChange={(e) => set({ limit: e.target.value === "all" ? null : cfg.limit || 25 })}>
                 <option value="all">All{companies ? ` (${companies.toLocaleString()})` : ""}</option>
                 <option value="some">Only the first…</option>
               </select>
@@ -83,51 +82,6 @@ export function LeadsPanel(props: {
           )}
           {props.findingPages && <p className="note"><Loader2 size={14} className="spin" aria-hidden="true" />Finding each company&rsquo;s page on this site…</p>}
 
-          <div className="aibox" aria-live="polite">
-            <div className="aihead">
-              <Bot size={15} aria-hidden="true" />
-              {props.aiError ? <span>AI status unknown: {props.aiError}</span> : !ai ? <span>Checking AI…</span> : ai.enabled ? (
-                <span>
-                  AI on: {ai.models?.length ? <>Groq <code>{ai.models[0]}</code>{ai.models[1] ? <>, then <code>{ai.models[1]}</code></> : null}</> : null}
-                  {ai.openrouter?.models.length ? <>{ai.models?.length ? ", then " : ""}OpenRouter free <code>{ai.openrouter.models.join(", ")}</code></> : null}
-                  {ai.search === false ? " (web search needs a Groq key)" : ""}
-                </span>
-              ) : (
-                <span>AI off: <code>GROQ_API_KEY</code> isn&rsquo;t set on the server. Lookups still run, without AI.</span>
-              )}
-              {ai?.enabled && (
-                <button type="button" className="btn btn-quiet btn-sm" onClick={props.onTestAi} disabled={props.testingAi}>
-                  {props.testingAi ? <Loader2 size={13} className="spin" aria-hidden="true" /> : null}Test AI
-                </button>
-              )}
-            </div>
-            {ai?.ok === true && (
-              <p className="note ok"><Check size={14} aria-hidden="true" /><span>Groq answered in {((ai.ms ?? 0) / 1000).toFixed(1)} s.{limits?.[1].remainingTokens != null ? ` Left right now on ${limits[0]}: ${limits[1].remainingRequests ?? "?"} requests today, ${limits[1].remainingTokens.toLocaleString()} tokens this minute.` : ""}</span></p>
-            )}
-            {ai?.ok === false && ai.enabled && (
-              <p className="note err" role="alert"><AlertTriangle size={14} aria-hidden="true" /><span>{ai.message}</span></p>
-            )}
-            {ai?.enabled && (
-              <div className="leadgrid">
-                <label htmlFor="lead-ai-auto">AI web searches</label>
-                <div className="limitrow">
-                  <label className="limitrow" style={{ gap: 6 }}>
-                    <input id="lead-ai-auto" type="checkbox" checked={cfg.aiSearch < 0} onChange={(e) => set({ aiSearch: e.target.checked ? -1 : 10 })} />
-                    <small>Automatic: as many as today&rsquo;s free limit allows</small>
-                  </label>
-                  {cfg.aiSearch >= 0 && (
-                    <input id="lead-ai" type="number" min={0} max={500} value={cfg.aiSearch} aria-label="AI web searches per run"
-                      onChange={(e) => set({ aiSearch: Math.max(0, Math.min(500, Math.floor(Number(e.target.value) || 0))) })} />
-                  )}
-                </div>
-              </div>
-            )}
-            <details className="extra">
-              <summary><ChevronRight size={14} aria-hidden="true" />How AI is used (Groq free tier)</summary>
-              <p>Names, emails and LinkedIn links are read by code from the pages, not by AI. AI is used for two small jobs: (1) reading a name where a page mentions a role but code couldn&rsquo;t isolate the name (about 1 request per 10 companies), and (2) web searches for missing websites (each uses about 3,000–6,000 of the 200,000 free tokens per day). Everything AI suggests is checked against the page text and dropped if it isn&rsquo;t written there. If Groq&rsquo;s limit is reached, you&rsquo;ll see the message here and the lookup carries on without AI.</p>
-            </details>
-          </div>
-
           <div className="tryrow">
             <button type="button" className="btn btn-quiet btn-sm" onClick={props.onTry} disabled={!!props.trying || props.busy || props.findingPages}>
               {props.trying ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <UserSearch size={13} aria-hidden="true" />}
@@ -140,14 +94,6 @@ export function LeadsPanel(props: {
             <p className="note ok"><Sparkles size={14} aria-hidden="true" />
               <span>{props.tried.looked} looked up: {props.tried.website} with a website, {props.tried.person} with a named decision-maker, {props.tried.email} with a personal email, {props.tried.linkedin} with LinkedIn. See the table.{props.tried.notes.length ? ` ${props.tried.notes.join(" ")}` : ""}</span>
             </p>
-          )}
-
-          {props.run?.quotaMessage && (
-            <p className="note err" role="alert"><AlertTriangle size={14} aria-hidden="true" /><span>{props.run.quotaMessage}</span></p>
-          )}
-          {props.run?.notices.map((n) => <p key={n} className="note warn"><AlertTriangle size={14} aria-hidden="true" /><span>{n}</span></p>)}
-          {props.run && (props.run.aiRequests > 0 || props.run.aiSearchesUsed > 0) && (
-            <p className="hint-line">AI this run: {props.run.aiRequests} Groq requests, {props.run.aiTokens.toLocaleString()} tokens, {props.run.aiSearchesUsed} web searches.</p>
           )}
 
           {count ? (

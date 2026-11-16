@@ -12,7 +12,7 @@
  */
 import type { Browser, HTTPResponse } from "puppeteer-core";
 import { parseHTML } from "linkedom";
-import { aiEnabled, extractRecords, nameFields, quotaNotice } from "./ai";
+import { aiEnabled, extractRecords, nameFields } from "./ai";
 import { passwordGuard, signIn, type Credentials } from "./login";
 import { extractorJs, launch, nudge, openPage } from "./browser";
 import { detectPagination, findRecordSets, findTotal, flatten, humanizeKey, isPlumbing, paginationKeyBody, type Flat } from "./records";
@@ -124,7 +124,7 @@ async function polishNames(title: string, apis: ApiSource[]) {
 
 function aiSource(rows: Array<Record<string, string>>): ApiSource {
   return {
-    id: "ai1", token: "", endpoint: "Read by AI from the page text", jsonPath: "", rows,
+    id: "ai1", token: "", endpoint: "Read from the page text", jsonPath: "", rows,
     total: rows.length, paginated: false, ai: true, fields: profile(rows).map((f) => ({ ...f, plumbing: false })),
   };
 }
@@ -345,17 +345,13 @@ export async function scan(
 
     const usefulFeed = apis.some((a) => a.rows.length >= 3 && a.fields.filter((f) => !f.plumbing && f.fill > 0.3).length >= 2);
     if (!listCount && !usefulFeed && aiEnabled()) {
-      say("Reading the page text with AI");
+      say("Reading the page text");
       const records = await extractRecords(title, pageText);
       if (records) apis.push(aiSource(records));
     }
     if (!apis.length && !listCount) {
-      notes.push(aiEnabled()
-        ? "No list or data was found on this page. Click the things you want on the page to capture them."
-        : "No list or data was found on this page. Click the things you want on the page to capture them, or add a Groq key to let AI read the page.");
+      notes.push("No list or data was found on this page. Click the things you want on the page to capture them.");
     }
-    const quota = quotaNotice();
-    if (quota) notes.push(quota.message); // a 429 is shown to the user, never hidden
     return { url, finalUrl, title, snapshot: snap.html, snapshotBytes: snap.bytes, apis, notes };
   } finally {
     await browser?.close().catch(() => undefined);

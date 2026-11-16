@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, Pause, Play, Sparkles, X } from "lucide-react";
+import { Download, Pause, Play, X } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 import { exportFields, finalRows } from "@/lib/job";
 import type { Column } from "@/lib/model";
@@ -44,8 +44,7 @@ export default function JobViewer({ v, onClose, onDownload, onResume, onPause }:
   }, []);
 
   const status =
-    state === "running" ? `${progress.label}${progress.of ? `: ${fmtN(progress.done)} of ${fmtN(progress.of)}` : ""}` :
-    state === "waiting" ? `Waiting for AI: ${fmtN(s.needAi)} companies left${job.leads?.aiWaitUntil ? `, continues around ${new Date(job.leads.aiWaitUntil).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : ""}` :
+    state === "running" || state === "waiting" ? progress.label || "Still working…" :
     state === "paused" ? `Paused: ${progress.label}` : state === "error" ? v.message ?? "Stopped" : "Finished";
 
   return (
@@ -62,7 +61,7 @@ export default function JobViewer({ v, onClose, onDownload, onResume, onPause }:
           <div className="viewer-actions">
             {state === "running" && v.live && <button type="button" className="btn btn-quiet btn-sm" onClick={onPause}><Pause size={13} aria-hidden="true" />Pause</button>}
             {(state === "paused" || state === "error") && <button type="button" className="btn btn-quiet btn-sm" onClick={onResume}><Play size={13} aria-hidden="true" />Resume</button>}
-            {state === "waiting" && <button type="button" className="btn btn-quiet btn-sm" onClick={onResume}><Sparkles size={13} aria-hidden="true" />Try AI now</button>}
+            {state === "waiting" && <button type="button" className="btn btn-quiet btn-sm" onClick={onResume}><Play size={13} aria-hidden="true" />Continue</button>}
             <button type="button" className="btn btn-primary btn-sm" onClick={() => onDownload("xlsx")}><Download size={13} aria-hidden="true" />Excel</button>
             <button type="button" className="btn btn-quiet btn-sm" onClick={() => onDownload("csv")}>CSV</button>
             <button ref={close} type="button" className="iconbtn" onClick={onClose} aria-label="Close"><X size={18} /></button>

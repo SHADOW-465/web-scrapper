@@ -105,8 +105,8 @@ const VIA: Record<string, string> = {
   listing: "Listed in the directory",
   "exhibitor-page": "Exhibitor page",
   "domain-check": "Name match (check)",
-  "web-search": "Web search (check)",
-  "ai-search": "AI web search (check)",
+  "web-search": "Web search",
+  "ai-search": "Web search",
 };
 const CONF: Record<string, string> = { high: "High", medium: "Medium", low: "Low" };
 
@@ -128,7 +128,7 @@ export function leadCells(r: LeadResult | undefined, names: Record<LeadField, st
     set("Decision-maker phone", p.phone);
     set("Decision-maker LinkedIn", p.linkedin);
     set("Decision-maker source", p.sourceUrl);
-    set("Decision-maker confidence", `${CONF[p.confidence] ?? p.confidence}${p.sourceKind === "ai" ? " (read by AI)" : ""}`);
+    set("Decision-maker confidence", CONF[p.confidence] ?? p.confidence);
   }
   set("Other decision-makers", more.slice(0, 5).map(personLabel).join("; "));
   set("Company email", r.companyEmail);

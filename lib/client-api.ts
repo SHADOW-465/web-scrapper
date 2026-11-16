@@ -193,7 +193,7 @@ export async function unlock(password: string): Promise<boolean> {
 export interface LookupBatchOut {
   results: import("./leads").LeadResult[];
   pending: string[];
-  ai: { enabled: boolean; requests: number; tokens: number; searches: number; quotaMessage?: string; quotaScope?: "day" | "minute"; quotaResetIn?: number };
+  ai: { enabled: boolean; requests: number; tokens: number; searches: number; quotaMessage?: string; quotaScope?: "day" | "minute"; quotaResetIn?: number; retryAfter?: number };
   notices: string[];
 }
 
@@ -214,7 +214,7 @@ export async function lookupBatch(
       byId.set(String(r.id), r as unknown as import("./leads").LeadResult); // a later event for the same company replaces the earlier one
     } else if (e.type === "ai") {
       noteAi(e);
-      ai = { enabled: !!e.enabled, requests: Number(e.requests) || 0, tokens: Number(e.tokens) || 0, searches: Number(e.searches) || 0, quotaMessage: typeof e.quotaMessage === "string" ? e.quotaMessage : (e.quota as { message?: string } | undefined)?.message, quotaScope: (e.quotaScope ?? (e.quota as { scope?: string } | undefined)?.scope) as "day" | "minute" | undefined, quotaResetIn: Number((e.quota as { resetInSeconds?: number } | undefined)?.resetInSeconds) || undefined };
+      ai = { enabled: !!e.enabled, requests: Number(e.requests) || 0, tokens: Number(e.tokens) || 0, searches: Number(e.searches) || 0, quotaScope: (e.quotaScope ?? (e.quota as { scope?: string } | undefined)?.scope) as "day" | "minute" | undefined, quotaResetIn: Number(e.retryAfter) || Number((e.quota as { resetInSeconds?: number } | undefined)?.resetInSeconds) || undefined, retryAfter: Number(e.retryAfter) || Number((e.quota as { resetInSeconds?: number } | undefined)?.resetInSeconds) || undefined };
     } else if (e.type === "notice") notices.push(String(e.message));
     else if (e.type === "done") pending = ((e.pending as string[]) ?? []).map(String);
     else if (e.type === "error") error = String(e.message);
@@ -248,7 +248,7 @@ export async function aiStatus(test = false): Promise<AiStatus> {
 
 /* ------------------------------------------------------------ plain-words request -> plan */
 
-export interface PlanAnswer { ai: import("./wishes").AiPlan | null; by?: string; reason?: "off" | "quota" | "error"; message?: string }
+export interface PlanAnswer { ai: import("./wishes").AiPlan | null; by?: string; reason?: "off" | "busy" | "quota" | "error"; message?: string; retryAfter?: number }
 
 /** Ask the AI planner to read a request. Never throws for AI problems: `ai` is null and `reason` says why. */
 export async function planWithAi(

@@ -22,13 +22,14 @@ import Preview from "./Preview";
 import Recipes from "./Recipes";
 import Sheet, { type SheetHandle } from "./Sheet";
 import { ColumnTray, ItemFields, ListsFound, ScopePicker, type CrawlMode, type Scope } from "./Tray";
+import { forPerson, technical } from "@/lib/copy";
 
 type Phase = "idle" | "scanning" | "ready" | "error" | "locked";
 
 interface Run {
   job: Job;
   progress: Progress;
-  state: "running" | "done" | "error" | "stopped" | "waiting"; // waiting: everything done except AI work, which continues when the free limit resets
+  state: "running" | "done" | "error" | "stopped" | "waiting";
   message?: string;
 }
 
@@ -201,7 +202,7 @@ export default function Studio() {
     } catch (e) {
       if (ac.signal.aborted) return;
       if (e instanceof LockedError) return setPhase("locked");
-      setError(e instanceof Error ? e.message : String(e));
+      setError(forPerson(e instanceof Error ? e.message : String(e)));
       setErrorKind(e instanceof ScanError ? e.kind : "server");
       setPhase("error");
     }
@@ -485,12 +486,11 @@ export default function Studio() {
       if (!t) return updateMsg(id, { busy: false, tone: "err", text: "The trial didn't work. You can still get the file.", actions: exportActions(plan, total) });
       updateMsg(id, {
         busy: false,
-        tone: t.quota ? "warn" : "ok",
+        tone: "ok",
         text: [
           `Tried ${t.looked}: ${t.website} with a website, ${t.person} with a named decision-maker, ${t.email} with a personal email, ${t.linkedin} with LinkedIn. They're in the table.`,
-          t.quota ?? "",
           `The full run looks up ${fmtN(plan?.limit ? Math.min(plan.limit, total ?? plan.limit) : total ?? 0)} companies; you can leave it running.`,
-        ].filter(Boolean).join("\n"),
+        ].join("\n"),
         actions: exportActions(plan, total),
       });
     });
@@ -500,16 +500,14 @@ export default function Studio() {
   useEffect(() => {
     if (!run || !plan || !runMatches) return;
     const p = run.progress;
-    const unit = p.stage === "items" ? "pages" : p.stage === "people" ? "companies" : "rows";
     if (run.state === "running") {
       const L = run.job.leads;
       const found = L ? Object.values(L.results) : [];
       const people = found.filter((r) => r.people.length).length;
       const sites = found.filter((r) => r.website).length;
       const text = [
-        `${p.label}: ${fmtN(p.done)}${p.of ? ` of ${fmtN(p.of)}` : ""} ${unit}`,
-        found.length ? `So far: ${fmtN(sites)} websites, ${fmtN(people)} companies with a named decision-maker.` : "",
-        L?.quotaMessage ?? "",
+        p.label,
+        found.length ? `So far: ${fmtN(sites)} websites, ${fmtN(people)} companies with a named contact.` : "",
       ].filter(Boolean).join("\n");
       const actions = [{ id: "ready-xlsx", label: "Download what's ready (Excel)" }, { id: "ready-csv", label: "CSV" }, { id: "pause", label: "Pause" }];
       if (!runMsg.current) runMsg.current = addMsg({ role: "assistant", text, busy: true, progress: { done: p.done, of: p.of }, actions });
@@ -518,9 +516,9 @@ export default function Studio() {
       const id = runMsg.current;
       runMsg.current = null;
       if (run.state === "done") updateMsg(id, { busy: false, progress: undefined, tone: "ok", text: run.message ?? "Done.", actions: [{ id: "download-xlsx", label: "Download Excel again" }, { id: "download-csv", label: "CSV" }] });
-      else if (run.state === "waiting") updateMsg(id, { busy: false, progress: undefined, tone: "warn", text: run.message ?? "Waiting for AI.", actions: [{ id: "download-xlsx", label: "Download now (Excel)", primary: true }, { id: "download-csv", label: "CSV" }, { id: "ai-now", label: "Try AI now" }] });
+      else if (run.state === "waiting") updateMsg(id, { busy: true, progress: undefined, text: "Still working…", actions: [{ id: "download-xlsx", label: "Download now (Excel)", primary: true }, { id: "download-csv", label: "CSV" }] });
       else if (run.state === "stopped") updateMsg(id, { busy: false, progress: undefined, tone: "warn", text: run.message ?? "Paused.", actions: [{ id: "resume", label: "Resume", primary: true }] });
-      else updateMsg(id, { busy: false, progress: undefined, tone: "err", text: run.message ?? "The export stopped.", actions: [{ id: "resume", label: "Retry from where it stopped", primary: true }] });
+      else updateMsg(id, { busy: false, progress: undefined, tone: "err", text: forPerson(run.message ?? ""), actions: [{ id: "resume", label: "Retry from where it stopped", primary: true }] });
     }
   }, [run?.state, run?.progress.done, run?.progress.label]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -556,7 +554,7 @@ export default function Studio() {
       const chunk = await fetchChunk(feed.token, cur.next, abort.current?.signal, 100);
       setBrowse({ id: browseId, raw: [...cur.raw, ...chunk.rows], next: chunk.next, error: chunk.error });
     } catch (e) {
-      setBrowse({ ...cur, error: e instanceof Error ? e.message : String(e) });
+      setBrowse({ ...cur, error: forPerson(e instanceof Error ? e.message : String(e)) });
     }
   }
   const planColumns: Column[] = useMemo(
@@ -602,8 +600,7 @@ export default function Studio() {
       });
       if (ac.signal.aborted || jobAbort.current !== ac) return;
       if (done.stage === "ai") {
-        // Every company is looked up; the AI part continues when the free limit resets. The job stays saved.
-        setRun({ job: done, progress: progressOf(done), state: "waiting", message: waitingMessage(done) });
+        setRun({ job: done, progress: progressOf(done), state: "waiting", message: "Still working…" });
         return;
       }
       // Runs started from the chat finish with download buttons instead of a surprise download.
@@ -612,7 +609,7 @@ export default function Studio() {
       const failed = failedItems(done).length;
       setRun({
         job: done, progress: progressOf(done), state: "done",
-        message: `${saved ? `${fmtN(count)} rows saved to ${saved.filename}.` : `Done: ${fmtN(count)} rows are ready.`}${failed ? ` ${fmtN(failed)} item pages couldn't be read; their columns are empty.` : ""}${done.note ? ` ${done.note}` : ""}${leadSummary(done)}`,
+        message: `${saved ? `Saved to ${saved.filename}. ` : ""}${finishLine(done)}${failed ? ` ${fmtN(failed)} detail pages couldn't be read; those cells are empty.` : ""}${done.note ? ` ${forPerson(done.note) === done.note ? done.note : ""}` : ""}`,
       });
       await keepJob(done); // stays in the history
     } catch (e) {
@@ -622,7 +619,7 @@ export default function Studio() {
       } else if (e instanceof LockedError) {
         setPhase("locked");
       } else {
-        setRun((r) => (r ? { ...r, state: "error", message: e instanceof Error ? e.message : String(e) } : r));
+        setRun((r) => (r ? { ...r, state: "error", message: forPerson(e instanceof Error ? e.message : String(e)) } : r));
       }
     } finally {
       void refreshResumable(); // the history panel shows the new state
@@ -715,13 +712,11 @@ export default function Studio() {
     try {
       const found: Record<string, LeadResult> = {};
       let queue = companies;
-      let quota: string | undefined;
       const notes: string[] = [];
       for (let pass = 0; pass < 2 && queue.length; pass++) {
         const out = await lookupBatch({ companies: queue, fairHost: new URL(scan.finalUrl).hostname, useAi: true, aiSearch: leadsCfg.aiSearch < 0 ? 2 : Math.min(2, leadsCfg.aiSearch) }, signal);
         for (const r of out.results) found[r.id] = r;
-        quota ??= out.ai.quotaMessage;
-        for (const n of out.notices) if (!notes.includes(n)) notes.push(n);
+        for (const n of out.notices) if (!notes.includes(n) && !technical(n)) notes.push(n);
         queue = queue.filter((c) => out.pending.includes(c.id));
       }
       if (signal?.aborted) return null;
@@ -733,11 +728,9 @@ export default function Studio() {
         person: list.filter((r) => r.people.length).length,
         email: list.filter((r) => r.people.some((p) => p.email)).length,
         linkedin: list.filter((r) => r.companyLinkedin || r.people.some((p) => p.linkedin)).length,
-        notes, // a 429 is shown in red in the AI box, not inside this success note
-        quota,
+        notes,
       };
       setTried(summary);
-      if (quota) setAi((a) => (a ? { ...a, ok: false, message: quota } : a));
       return summary;
     } catch (e) {
       if (signal?.aborted) return null;
@@ -745,7 +738,7 @@ export default function Studio() {
         setPhase("locked");
         return null;
       }
-      setTryError(e instanceof Error ? e.message : String(e));
+      setTryError(forPerson(e instanceof Error ? e.message : String(e)));
       return null;
     } finally {
       setTrying(null);
@@ -800,7 +793,6 @@ export default function Studio() {
     const prev = plan;
     const thinking = addMsg({ role: "assistant", text: prev ? "Changing your export…" : "Reading your request…", busy: true });
     let next: Plan;
-    let how = "";
     try {
       const rules = prev ? followUp(prev, text, avail) : { ...resolvePlan(parseRequest(text), avail), request: text };
       const answer = await planWithAi({
@@ -809,12 +801,10 @@ export default function Studio() {
       }, abort.current?.signal);
       const viaAi = answer.ai ? fromAi(answer.ai, avail, prev ? `${prev.request}\n${text}` : text, prev ?? undefined) : null;
       next = viaAi ?? rules;
-      how = viaAi ? `Understood by AI (${answer.by && answer.by !== "cache" ? answer.by : "from an earlier answer"}).` : answer.reason === "quota" ? `Understood by the built-in rules: ${answer.message}` : answer.reason === "off" ? "Understood by the built-in rules (AI is off)." : `Understood by the built-in rules (AI didn't answer: ${answer.message}).`;
-      if (answer.reason === "quota") setAi((a) => (a ? { ...a, ok: false, message: answer.message } : a));
     } catch (e) {
       setPlanning(false);
       if (e instanceof LockedError) return setPhase("locked");
-      updateMsg(thinking, { busy: false, tone: "err", text: e instanceof Error ? e.message : String(e) });
+      updateMsg(thinking, { busy: false, tone: "err", text: forPerson(e instanceof Error ? e.message : String(e)) });
       return;
     }
     if (!next.items.length) {
@@ -826,13 +816,13 @@ export default function Studio() {
     const lookup = needsLookup(next);
     const total = expectedRows ?? onPage;
     const lines = [
+      ackLine(next),
       `Here's your export: ${next.items.length} column${next.items.length === 1 ? "" : "s"}${next.sources ? ", each with its source and confidence" : ""}.`,
       next.country || next.limit ? `Only ${[next.country ? `companies from ${next.country}` : "", next.limit ? `the first ${next.limit}` : ""].filter(Boolean).join(", ")}.` : "",
       next.unresolved.length ? `Not available on this site: ${next.unresolved.join(", ")}.` : "",
       lookup
         ? `Looking up every company now${next.limit ? ` (the first ${fmtN(next.limit)})` : ""}: its page on this site, then its own website (imprint, team, contact). Results fill the table as they come in; you can download what's ready at any time.`
         : "Fetching every row now; the table fills as it goes.",
-      how,
     ].filter(Boolean);
     updateMsg(thinking, {
       busy: false,
@@ -890,7 +880,6 @@ export default function Studio() {
     }
     else if (id === "pause") jobAbort.current?.abort();
     else if (id === "ai-now" && run?.job.leads) {
-      // Check now whether the limit has reset (one request); if not, it waits again.
       run.job.leads.aiWaitUntil = undefined;
       runMsg.current = null;
       void execute(run.job, { download: false });
@@ -982,7 +971,7 @@ export default function Studio() {
         return { job, state, progress: run.progress, message: run.message, live: true };
       }
       const state = job.stage === "done" ? "done" : job.stage === "ai" ? "waiting" : job.error ? "error" : "paused";
-      return { job, state, progress: progressOf(job), message: job.error, live: false };
+      return { job, state, progress: progressOf(job), message: job.error ? forPerson(job.error) : undefined, live: false };
     });
   }, [history, run]);
   const viewed = viewId ? jobViews.find((v) => v.job.id === viewId) ?? null : null;
@@ -1089,7 +1078,7 @@ export default function Studio() {
                 <p>
                   Sign in to the site in your own browser. Open DevTools, choose <b>Network</b>, reload, click the page request, and copy the <b>Cookie</b> request header. Paste it here. It is sent only to that site, never saved, and never shown again.
                 </p>
-                <textarea id="cookie" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="sessionid=…; token=…" spellCheck={false} aria-label="Cookie for this site" />
+                <textarea id="cookie" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="sessionid=…; sid=…" spellCheck={false} aria-label="Cookie for this site" />
                 <div style={{ display: "flex", gap: 8, marginTop: 8, justifyContent: "flex-end" }}>
                   {cookie && <button className="btn btn-ghost btn-sm" onClick={() => setCookie("")}>Clear</button>}
                   <button className="btn btn-primary btn-sm" onClick={() => setCookieOpen(false)}>Done</button>
@@ -1166,7 +1155,7 @@ export default function Studio() {
                   </p>
                 )}
                 {layoutMissing && <p className="note warn" style={{ marginTop: 8 }}><AlertTriangle size={14} aria-hidden="true" />The page&rsquo;s layout couldn&rsquo;t be read, so only the site&rsquo;s data is shown.</p>}
-                {scan.notes.map((n) => <p key={n} className="note" style={{ marginTop: 8 }}>{n}</p>)}
+                {scan.notes.filter((n) => !technical(n)).map((n) => <p key={n} className="note" style={{ marginTop: 8 }}>{n}</p>)}
               </section>
 
               {ws && (
@@ -1319,7 +1308,7 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop, onDownload }: 
         <div className="jobrow">
           <div style={{ minWidth: 0 }}>
             <b>{run.job.title}</b>
-            <span>{run.state === "running" ? `${run.progress.label}: ${fmtN(run.progress.done)}${run.progress.of ? ` of ${fmtN(run.progress.of)}` : ""}` : run.message}</span>
+            <span>{run.state === "running" || run.state === "waiting" ? run.progress.label : run.message}</span>
           </div>
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
             {(run.state === "waiting" || run.state === "done" || run.job.stage === "people" || run.job.stage === "ai") && (
@@ -1327,7 +1316,7 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop, onDownload }: 
             )}
             {run.state === "running"
               ? <button className="btn btn-quiet btn-sm" onClick={onStop}>Pause</button>
-              : run.state !== "done" && <button className="btn btn-quiet btn-sm" onClick={() => onResume(run.job)}><RotateCcw size={13} aria-hidden="true" />{run.state === "waiting" ? "Try AI now" : "Resume"}</button>}
+              : run.state !== "done" && <button className="btn btn-quiet btn-sm" onClick={() => onResume(run.job)}><RotateCcw size={13} aria-hidden="true" />{run.state === "waiting" ? "Continue" : "Resume"}</button>}
           </div>
         </div>
       )}
@@ -1336,14 +1325,12 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop, onDownload }: 
         return (
           <div className="jobrow" key={j.id}>
             <div style={{ minWidth: 0 }}>
-              <b>{pr.stage === "ai" ? "Waiting for AI" : "Unfinished"}: {j.title}</b>
-              <span>{pr.stage === "ai"
-                ? `${fmtN((pr.of ?? 0) - pr.done)} ${(pr.of ?? 0) - pr.done === 1 ? "company still needs" : "companies still need"} AI${j.leads?.aiWaitUntil && j.leads.aiWaitUntil > Date.now() ? ` · continues by itself around ${new Date(j.leads.aiWaitUntil).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : " · continuing"}`
-                : `${pr.stage === "items" ? `Item pages ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : pr.stage === "people" ? `Companies looked up ${fmtN(pr.done)} of ${fmtN(pr.of ?? 0)}` : `${fmtN(j.raw.length)} rows so far`} · ${new Date(j.updatedAt).toLocaleString()}`}</span>
+              <b>{pr.stage === "ai" ? "Still working" : "Unfinished"}: {j.title}</b>
+              <span>{pr.label}</span>
             </div>
             <div style={{ display: "flex", gap: 4 }}>
               {(pr.stage === "ai" || pr.stage === "people") && <button className="btn btn-quiet btn-sm" onClick={() => onDownload(j, "xlsx")}><Download size={13} aria-hidden="true" />Excel</button>}
-              <button className="btn btn-quiet btn-sm" onClick={() => onResume(j)}><RotateCcw size={13} aria-hidden="true" />{pr.stage === "ai" ? "Try AI now" : "Resume"}</button>
+              <button className="btn btn-quiet btn-sm" onClick={() => onResume(j)}><RotateCcw size={13} aria-hidden="true" />{pr.stage === "ai" ? "Continue" : "Resume"}</button>
               <button className="iconbtn" onClick={() => onDiscard(j)} aria-label={`Discard ${j.title}`}><Trash2 size={15} /></button>
             </div>
           </div>
@@ -1353,17 +1340,26 @@ function JobBanner({ run, resumable, onResume, onDiscard, onStop, onDownload }: 
   );
 }
 
-/** What a job waiting for AI tells the user. */
-function waitingMessage(job: Job): string {
-  const L = job.leads;
-  const left = L ? Object.values(L.results).filter((r) => r.needsAi?.length).length : 0;
-  const at = L?.aiWaitUntil ? new Date(L.aiWaitUntil).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : "soon";
-  return [
-    `Every company is looked up.${leadSummary(job)}`,
-    `${fmtN(left)} ${left === 1 ? "company still needs" : "companies still need"} AI (finding a website, or reading a name), and today's free AI limit is used up.`,
-    `They continue by themselves around ${at}, whenever this site is open in a tab, and on later days until all are done. Nothing is lost if you close it: it picks up when you come back.`,
-    "You can download the file now; it has everything found so far.",
-  ].join("\n");
+/** "Done — 1,043 exhibitors with name, country, stand and website. 812 have an email." */
+function finishLine(job: Job): string {
+  const rows = finalRows(job);
+  const n = rows.length;
+  const fields = exportFields(job).filter((name) => !/source|confidence/i.test(name));
+  const kind = /exhibitor|aussteller/i.test(`${job.title} ${job.request ?? ""}`) ? (n === 1 ? "exhibitor" : "exhibitors") : (n === 1 ? "row" : "rows");
+  const pick = fields.slice(0, 4);
+  const listed = pick.length === 0 ? "" : pick.length === 1 ? pick[0] : `${pick.slice(0, -1).join(", ")} and ${pick[pick.length - 1]}`;
+  const emails = rows.filter((r) => Object.entries(r).some(([k, v]) => !/source|confidence/i.test(k) && String(v ?? "").includes("@"))).length;
+  return `Done — ${fmtN(n)} ${kind}${listed ? ` with ${listed}` : ""}.${emails ? ` ${fmtN(emails)} have an email.` : ""}`;
+}
+
+function ackLine(next: Plan): string {
+  const exhib = /exhibitor|aussteller/i.test(next.request);
+  if (next.limit) {
+    return exhib
+      ? `Got it — getting the first ${fmtN(next.limit)} exhibitors from this directory.`
+      : `Got it — getting the first ${fmtN(next.limit)} from this list.`;
+  }
+  return exhib ? "Got it — getting every exhibitor from this directory." : "Got it — getting every row from this list.";
 }
 
 /** The config saved with a job (the UI-only listId is dropped). */
@@ -1372,13 +1368,4 @@ function stripCfg(c: LeadsConfig & { listId?: string }): LeadsConfig {
   return rest;
 }
 
-/** " 812 of 1,000 companies have a named decision-maker…" for the finished-export message. */
-function leadSummary(job: Job): string {
-  const L = job.leads;
-  if (!L?.config.on) return "";
-  const all = Object.values(L.results);
-  const person = all.filter((r) => r.people.length).length;
-  const email = all.filter((r) => r.people.some((p) => p.email)).length;
-  const site = all.filter((r) => r.website).length;
-  return ` Decision-makers: ${fmtN(person)} of ${fmtN(all.length)} companies have a named person (${fmtN(email)} with a personal email), ${fmtN(site)} have a website.${L.quotaMessage ? ` ${L.quotaMessage}` : ""}`;
-}
+

@@ -41,7 +41,7 @@ export function Welcome({ onTry }: { onTry: (url: string) => void }) {
 }
 
 const STEPS = ["Starting a browser", "Opening the page", "Waiting for the content to appear", "Reading what the page shows", "Matching it to the site's own data"];
-const OTHER = ["Checking the page address", "The page didn't load its content; trying again", "Reading the data address directly", "Reading the page without a browser", "Reading the page text with AI"];
+const OTHER = ["Checking the page address", "The page didn't load its content; trying again", "Reading the data address directly", "Reading the page without a browser", "Reading the page text"];
 
 export function Printing({ host, status }: { host: string; status: string[] }) {
   const current = status[status.length - 1];

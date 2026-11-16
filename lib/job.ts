@@ -8,6 +8,7 @@
  * of starting over or silently truncating.
  */
 import { crawlPages, fetchChunk, HttpError, LockedError, lookupBatch, readItemBatch, type CrawlRequest } from "./client-api";
+import { SITE_DOWN, STILL, hiccup } from "./copy";
 import type { Format } from "./exporters";
 import { assemble, specFor, urlsFor, type ItemResult } from "./items-client";
 import { companiesFrom, companyKey, joinLeads, leadFieldNames, type CompanyRef, type LeadResult, type LeadsState } from "./leads";
@@ -222,7 +223,7 @@ async function withRetry<T>(what: string, fn: () => Promise<T>, signal: AbortSig
       if (e instanceof HttpError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429) throw e;
       lastErr = e;
       const wait = [2, 5, 10, 20, 30, 45][i] * 1000;
-      onWait(`${what} didn't go through (${e instanceof Error ? e.message : e}). Trying again in ${wait / 1000}s`);
+      onWait(STILL);
       await sleep(wait, signal);
     }
   }
@@ -262,7 +263,7 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
             // The server retried a page and gave up; keep what arrived and retry from that page.
             job.nextIndex = chunk.failedAt;
             await saveJob(job);
-            wait(`${String(chunk.error).replace(/\.$/, "")}. Trying again in 10s`);
+            wait(hiccup(String(chunk.error || "")));
             await sleep(10_000, signal);
             continue;
           }
@@ -288,8 +289,8 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           },
           status: (s) => wait(s),
         }, signal);
-        if (summary.stoppedBy === "limit") job.note = `Stopped at your ${job.crawl.maxPages}-page limit.`;
-        if (summary.stoppedBy === "time") job.note = `Stopped after ${summary.pages} pages at the 5-minute limit for page-by-page capture.`;
+        if (summary.stoppedBy === "limit") job.note = `Stopped after ${job.crawl.maxPages} pages, as you asked.`;
+        if (summary.stoppedBy === "time") job.note = `Stopped after ${summary.pages} pages. Page-by-page capture runs for about 5 minutes at a time.`;
       }
       job.stage = specFor(job.ws) ? "items" : job.leads?.config.on ? "people" : "done";
       await saveJob(job);
@@ -351,16 +352,14 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
           L.aiSearchesUsed -= grant - Math.min(grant, out.ai.searches);
           L.aiRequests += out.ai.requests;
           L.aiTokens += out.ai.tokens;
-          // A daily limit stops AI for the rest of the run (and is shown); a per-minute one only skips this batch.
-          if (out.ai.quotaMessage && out.ai.quotaScope !== "minute") L.quotaMessage = out.ai.quotaMessage;
-          for (const n of out.notices) if (!L.notices.includes(n) && L.notices.length < 5) L.notices.push(n);
+          if (out.ai.retryAfter) L.aiWaitUntil = Date.now() + out.ai.retryAfter * 1000;
           for (const r of out.results) L.results[r.id] = mergeLead(L.results[r.id], r);
           for (const id of out.pending) {
             const c = batch.find((b) => b.id === id);
             if (!c) continue;
             L.attempts[id] = (L.attempts[id] ?? 0) + 1;
             if (L.attempts[id] >= 3) {
-              L.results[id] = { id, name: c.name, people: [], pages: [], notes: ["The lookup took too long three times and was skipped."] };
+              L.results[id] = { id, name: c.name, people: [], pages: [], notes: [] };
             } else queue.push(c); // not finished in that call's time: back in line
           }
           await saveJob(job);
@@ -384,7 +383,9 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
         fairHost = undefined;
       }
       for (;;) {
-        if (L.aiWaitUntil && L.aiWaitUntil > Date.now()) break; // waiting for the free limit to reset
+        if (L.aiWaitUntil && L.aiWaitUntil > Date.now()) {
+          await sleep(L.aiWaitUntil - Date.now(), signal);
+        }
         L.aiWaitUntil = undefined;
         L.quotaMessage = undefined;
         const queue = needingAi(job);
@@ -395,7 +396,7 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
         const batch = queue.slice(0, 4); // AI-bound: small batches, one at a time
         const searches = batch.filter((c) => L.results[c.id]?.needsAi?.includes("search")).length;
         status = "";
-        const out = await withRetry("AI pass", () => lookupBatch({ companies: batch, fairHost, useAi: true, aiSearch: Math.min(2, searches) }, signal), signal, wait);
+        const out = await withRetry("Details", () => lookupBatch({ companies: batch, fairHost, useAi: true, aiSearch: Math.min(2, searches) }, signal), signal, wait);
         L.aiRequests += out.ai.requests;
         L.aiTokens += out.ai.tokens;
         L.aiSearchesUsed += out.ai.searches;
@@ -403,26 +404,22 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
         for (const c of batch) {
           if (!L.results[c.id]?.needsAi?.length) continue;
           L.aiAttempts[c.id] = (L.aiAttempts[c.id] ?? 0) + 1;
-          if (L.aiAttempts[c.id] >= 3) L.results[c.id] = { ...L.results[c.id], needsAi: undefined, notes: [...L.results[c.id].notes, "AI was tried three times without an answer."] };
+          if (L.aiAttempts[c.id] >= 3) L.results[c.id] = { ...L.results[c.id], needsAi: undefined };
         }
-        if (out.ai.quotaScope === "day" || (!out.ai.enabled && out.ai.requests === 0)) {
-          if (!out.ai.enabled) {
-            // AI is not configured on the server: nothing to wait for.
-            for (const c of needingAi(job)) L.results[c.id] = { ...L.results[c.id], needsAi: undefined };
-            continue;
-          }
-          L.aiWaitUntil = Date.now() + Math.max(15 * 60, out.ai.quotaResetIn ?? 3600) * 1000;
-          L.quotaMessage = out.ai.quotaMessage;
+        if (!out.ai.enabled && out.ai.requests === 0) {
+          for (const c of needingAi(job)) L.results[c.id] = { ...L.results[c.id], needsAi: undefined };
+          continue;
+        }
+        const waitS = out.ai.retryAfter || (out.ai.quotaScope ? out.ai.quotaResetIn : undefined);
+        if (waitS) {
+          L.aiWaitUntil = Date.now() + waitS * 1000;
           await saveJob(job);
           report();
-          break;
+          await sleep(waitS * 1000, signal);
+          L.aiWaitUntil = undefined;
         }
         await saveJob(job);
         report();
-        if (out.ai.quotaScope === "minute") {
-          wait("The free AI per-minute limit was reached. Continuing in a minute");
-          await sleep(60_000, signal);
-        }
       }
       await saveJob(job);
     }
@@ -433,7 +430,8 @@ export async function runJob(job: Job, opts: RunOptions): Promise<Job> {
       await saveJob(job);
       throw e;
     }
-    job.error = e instanceof Error ? e.message : String(e);
+    const raw = e instanceof Error ? e.message : String(e);
+    job.error = /progress is saved/i.test(raw) && !/no progress/i.test(raw) ? raw : SITE_DOWN;
     await saveJob(job);
     report();
     throw e;
@@ -476,28 +474,30 @@ export function mergeLead(old: LeadResult | undefined, next: LeadResult, fromAiP
   return merged;
 }
 
+const noun = (job: Job) => (/exhibitor|aussteller/i.test(`${job.title} ${job.request ?? ""}`) ? "exhibitors" : "rows");
+
 export function progressOf(job: Job, status = ""): Progress {
+  if (status === "Still working…") return { stage: job.stage, label: status, done: job.raw.length, of: job.total };
   if (job.stage === "rows") {
-    const label = status || (job.scope === "crawl" ? `Page ${job.pages || 1}` : `Fetching rows, page ${job.nextIndex + 1}`);
+    const label = status || (job.scope === "crawl" ? `Finding ${noun(job)}… ${job.raw.length.toLocaleString()} found` : `Finding ${noun(job)}… ${job.raw.length.toLocaleString()} found`);
     return { stage: "rows", label, done: job.raw.length, of: job.total };
   }
   if (job.stage === "items") {
     const all = itemUrls(job);
     const done = all.filter((u) => job.results[u]).length;
-    return { stage: "items", label: status || "Reading each item's page", done, of: all.length };
+    return { stage: "items", label: status || `Adding details ${done.toLocaleString()} / ${all.length.toLocaleString()}`, done, of: all.length };
   }
   if (job.stage === "people" && job.leads) {
     const companies = companiesOf(job);
     const done = companies.filter((c) => job.leads!.results[c.id]).length;
-    return { stage: "people", label: status || "Looking up each company's decision-makers", done, of: companies.length };
+    return { stage: "people", label: status || `Looking up contacts ${done.toLocaleString()} / ${companies.length.toLocaleString()}`, done, of: companies.length };
   }
   if (job.stage === "ai" && job.leads) {
     const left = needingAi(job).length;
     const total = Math.max(job.leads.aiTotal ?? left, left);
-    const waiting = job.leads.aiWaitUntil && job.leads.aiWaitUntil > Date.now();
-    return { stage: "ai", label: status || (waiting ? "Waiting for the free AI limit to reset" : "AI pass: finding missing websites and reading names"), done: total - left, of: total };
+    return { stage: "ai", label: status || "Almost done…", done: total - left, of: total };
   }
-  return { stage: job.stage, label: status, done: 0, of: null };
+  return { stage: job.stage, label: status || "Almost done…", done: 0, of: null };
 }
 
 export function failedItems(job: Job): string[] {

@@ -337,8 +337,8 @@ export async function lookupCompany(input: CompanyInput, fetcher: PageFetcher = 
       res.website = given;
       res.websiteSource = givenSource;
       res.notes.push(r && (r.status === 403 || r.status === 429)
-        ? `The company's website (${new URL(given).hostname}) refuses automated visits (HTTP ${r.status}), so its pages were not read.`
-        : `The company's website (${new URL(given).hostname}) did not load${r?.status ? ` (HTTP ${r.status})` : ""}.`);
+        ? `The company's website (${new URL(given).hostname}) could not be opened, so its pages were not read.`
+        : `The company's website (${new URL(given).hostname}) did not load.`);
     }
   }
   if (!home && !res.website) {
@@ -371,9 +371,7 @@ export async function lookupCompany(input: CompanyInput, fetcher: PageFetcher = 
   const phones = new Map<string, string>();
   res._hard = [];
   const guessed = res.websiteSource === "web-search" || res.websiteSource === "ai-search" || res.websiteSource === "domain-check";
-  if (guessed) res.notes.push(res.websiteSource === "ai-search"
-    ? "Website found by AI web search and checked against the company name (not listed by the fair); check it is the right company."
-    : "Website matched by company name (not listed by the fair); check it is the right company.");
+  if (guessed) res.notes.push("Website matched from the company name. Check it is the right company.");
   for (const pg of pages) {
     let f: PageFacts;
     try {
@@ -397,7 +395,7 @@ export async function lookupCompany(input: CompanyInput, fetcher: PageFetcher = 
   res.companyEmailSource = res.companyEmail ? emails.get(res.companyEmail) : undefined;
   res.companyPhone = [...phones.keys()][0];
   res.companyPhoneSource = res.companyPhone ? phones.get(res.companyPhone) : undefined;
-  if (!res.people.length) res.notes.push(res._hard.length ? "A role was mentioned but no clear name; AI may help." : "No decision-maker names are published on the pages read.");
+  if (!res.people.length && !res._hard.length) res.notes.push("No decision-maker names are published on the pages read.");
   res.people.sort((a, b) => rank(a) - rank(b));
   if (res.people.length) res._hard = [];
   return res;
@@ -461,7 +459,7 @@ async function resolveChunk(todo: CompanyResult[]): Promise<number> {
         }
       }
     }
-    if (r.people.length) r.notes = r.notes.filter((n) => !n.includes("AI may help"));
+    if (r.people.length) r.notes = r.notes.filter((n) => n !== "A role was mentioned but no clear name.");
   }
   return found;
 }

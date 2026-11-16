@@ -2,7 +2,6 @@ import { denied, hasAccess } from "@/lib/access";
 import { aiWebsiteCandidates, fetchPage, lookupCompany, publicResult, resolveHardCases, type CompanyInput, type CompanyResult, type WebsiteSearch } from "@/lib/company";
 import { AiQuotaError, aiEnabled, searchEnabled, takeUsage } from "@/lib/groq";
 import { ndjson } from "@/lib/ndjson";
-import { safeMessage } from "@/lib/redact";
 
 export const runtime = "nodejs";
 export const maxDuration = 90; // a batch must finish well inside this; the client sends the rest in the next call
@@ -43,7 +42,7 @@ export async function POST(req: Request) {
 
   return ndjson(async (emit, signal) => {
     const deadline = Date.now() + BUDGET_MS;
-    let quota: string | undefined;
+    let retryAfter = 0;
     let quotaScope: "day" | "minute" | undefined;
     let searchesUsed = 0;
     // AI web search, one at a time (8K tokens/min on the free tier), only while budget, time and quota allow.
@@ -53,7 +52,7 @@ export async function POST(req: Request) {
     const search: WebsiteSearch | undefined = searchEnabled()
       ? (name, country) => {
           const next = searchLock.then(async () => {
-            if (!useAi || searchesLeft <= 0 || (quota && quotaScope === "day") || Date.now() > deadline - 15_000) {
+            if (!useAi || searchesLeft <= 0 || retryAfter > 0 || Date.now() > deadline - 15_000) {
               searchSkipped.add(name);
               return [];
             }
@@ -63,10 +62,10 @@ export async function POST(req: Request) {
               return await aiWebsiteCandidates(name, country);
             } catch (e) {
               if (e instanceof AiQuotaError) {
-                quota = e.message;
+                retryAfter = Math.max(retryAfter, e.retryAfter);
                 quotaScope = e.scope;
                 searchSkipped.add(name);
-              } else emit({ type: "notice", message: `AI web search failed: ${safeMessage(e)}` });
+              }
               return [];
             }
           });
@@ -99,7 +98,7 @@ export async function POST(req: Request) {
               emit({ type: "company", ...publicResult(r) });
             }
           } catch (e) {
-            emit({ type: "company", id: c.id, name: c.name, people: [], pages: [], notes: [`Lookup failed: ${safeMessage(e)}`] });
+            emit({ type: "company", id: c.id, name: c.name, people: [], pages: [], notes: [] });
           }
         }
       }),
@@ -108,7 +107,7 @@ export async function POST(req: Request) {
 
     // Hard cases: AI reads names where code found a role but no clear name (10 companies per request).
     const namesRead = new Set<string>();
-    if (useAi && !(quota && quotaScope === "day") && Date.now() < deadline + 10_000) {
+    if (useAi && !retryAfter && Date.now() < deadline + 10_000) {
       try {
         const before = done.map((d) => d.people.length);
         await resolveHardCases(done, (ids) => ids.forEach((id) => namesRead.add(id)));
@@ -117,9 +116,9 @@ export async function POST(req: Request) {
         });
       } catch (e) {
         if (e instanceof AiQuotaError) {
-          quota = e.message; // shown to the user, not hidden
+          retryAfter = Math.max(retryAfter, e.retryAfter);
           quotaScope = e.scope;
-        } else emit({ type: "notice", message: `AI step skipped: ${safeMessage(e)}` });
+        }
       }
     }
     // What AI still has to do, per company: sent so the browser can queue it for when the limits allow.
@@ -131,7 +130,7 @@ export async function POST(req: Request) {
         if (needs.length) emit({ type: "company", ...publicResult(d), needsAi: needs });
       }
     }
-    emit({ type: "ai", enabled: aiEnabled(), quotaMessage: quota, quotaScope, searches: searchesUsed, ...takeUsage() });
+    emit({ type: "ai", enabled: aiEnabled(), retryAfter: retryAfter || undefined, busy: retryAfter > 0, quotaScope, searches: searchesUsed, ...takeUsage() });
     emit({ type: "done", pending: queue.map((c) => c.id) });
   });
 }

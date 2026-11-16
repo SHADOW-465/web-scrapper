@@ -1,10 +1,11 @@
 "use client";
 
-import { Activity, Bot, Download, FolderOpen, History, Pause, Play, RotateCcw, Sparkles, Trash2, X } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { Activity, Bot, Download, FolderOpen, History, Pause, Play, RotateCcw, Trash2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { AiStatus } from "@/lib/client-api";
 import type { Job, Progress } from "@/lib/job";
-import { AiUsage, leftPercent, useAiDay } from "./AiUsageBar";
+import { leftPercent, useAiDay } from "./AiUsageBar";
+import { AiUsage } from "./debug/AiUsageDebug";
 
 export type JobState = "running" | "waiting" | "paused" | "done" | "error";
 export interface JobView { job: Job; state: JobState; progress: Progress; message?: string; live: boolean }
@@ -19,7 +20,7 @@ const hostOf = (u: string) => {
 };
 const when = (t: number) => new Date(t).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
-const STATE_LABEL: Record<JobState, string> = { running: "Running", waiting: "Waiting for AI", paused: "Paused", done: "Done", error: "Stopped" };
+const STATE_LABEL: Record<JobState, string> = { running: "Running", waiting: "Still working", paused: "Paused", done: "Done", error: "Stopped" };
 
 /** The numbers a list row shows, from what the job holds (cheap: no table is built). */
 export function jobStats(job: Job) {
@@ -48,7 +49,6 @@ function JobItem({ v, onOpen, onDownload, onResume, onPause, onDelete }: {
   const { job, state, progress } = v;
   const s = jobStats(job);
   const pct = progress.of ? Math.min(100, (progress.done / progress.of) * 100) : null;
-  const wait = state === "waiting" && job.leads?.aiWaitUntil && job.leads.aiWaitUntil > Date.now() ? job.leads.aiWaitUntil : null;
   return (
     <li className={`jobitem ${state}`}>
       <div className="ji-top">
@@ -63,7 +63,7 @@ function JobItem({ v, onOpen, onDownload, onResume, onPause, onDelete }: {
         <>
           <div className={`meter${pct == null ? " indeterminate" : ""}`} aria-hidden="true"><i style={{ transform: `scaleX(${(pct ?? 0) / 100})` }} /></div>
           <div className="ji-progress">
-            {wait ? `Continues by itself around ${when(wait)}` : `${progress.label}${progress.of ? `: ${fmtN(progress.done)} of ${fmtN(progress.of)}` : ""}`}
+            {progress.label}
           </div>
         </>
       )}
@@ -73,7 +73,7 @@ function JobItem({ v, onOpen, onDownload, onResume, onPause, onDelete }: {
           <span><b>{fmtN(s.looked)}</b>{s.companies ? ` of ${fmtN(s.companies)}` : ""} companies looked up</span>
           <span><b>{fmtN(s.people)}</b> with a decision-maker</span>
           <span><b>{fmtN(s.websites)}</b> websites</span>
-          {s.needAi ? <span className="warn"><b>{fmtN(s.needAi)}</b> waiting for AI</span> : null}
+          {s.needAi ? <span><b>{fmtN(s.needAi)}</b> still filling in</span> : null}
         </> : null}
       </div>
       {v.message && state === "error" && <p className="note err">{v.message}</p>}
@@ -83,7 +83,7 @@ function JobItem({ v, onOpen, onDownload, onResume, onPause, onDelete }: {
         <button type="button" className="btn btn-quiet btn-sm" onClick={() => onDownload(job, "csv")}>CSV</button>
         {state === "running" && v.live && <button type="button" className="btn btn-quiet btn-sm" onClick={onPause}><Pause size={13} aria-hidden="true" />Pause</button>}
         {(state === "paused" || state === "error") && <button type="button" className="btn btn-quiet btn-sm" onClick={() => onResume(job)}><Play size={13} aria-hidden="true" />Resume</button>}
-        {state === "waiting" && <button type="button" className="btn btn-quiet btn-sm" onClick={() => onResume(job)}><Sparkles size={13} aria-hidden="true" />Try AI now</button>}
+        {state === "waiting" && <button type="button" className="btn btn-quiet btn-sm" onClick={() => onResume(job)}><Play size={13} aria-hidden="true" />Continue</button>}
         <span style={{ flex: 1 }} />
         <button type="button" className="iconbtn" onClick={() => onDelete(job)} aria-label={`Delete ${job.title}`} title="Delete from history"><Trash2 size={15} /></button>
       </div>
@@ -91,9 +91,7 @@ function JobItem({ v, onOpen, onDownload, onResume, onPause, onDelete }: {
   );
 }
 
-/**
- * The floating button (bottom left) and its panel: every export with its progress, and today's AI usage.
- */
+/** The floating button (bottom left) and its panel: every export with its progress. */
 export default function Dock(props: {
   open: boolean;
   setOpen: (v: boolean) => void;
@@ -114,7 +112,12 @@ export default function Dock(props: {
   const panel = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const day = useAiDay();
-  const pct = leftPercent(day, props.ai);
+  const [debug, setDebug] = useState(process.env.NODE_ENV !== "production");
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("debug") === "1") setDebug(true);
+  }, []);
+  const pct = debug ? leftPercent(day, props.ai) : null;
+  const showUsage = debug && tab === "usage";
   const running = jobs.some((j) => j.state === "running");
   const waiting = !running && jobs.some((j) => j.state === "waiting");
 
@@ -144,30 +147,32 @@ export default function Dock(props: {
       <button
         ref={button} type="button" className={`dock-btn${running ? " running" : waiting ? " waiting" : ""}`}
         aria-expanded={open} aria-controls="dock" onClick={() => setOpen(!open)}
-        title={running ? "An export is running" : waiting ? "An export is waiting for AI" : "Exports and AI usage"}
+        title={running ? "An export is running" : waiting ? "An export is still working" : "Exports"}
       >
         <Activity size={18} aria-hidden="true" />
-        <span className="visually-hidden">Exports and AI usage{running ? " (an export is running)" : waiting ? " (an export is waiting for AI)" : ""}</span>
+        <span className="visually-hidden">Exports{running ? " (an export is running)" : waiting ? " (an export is still working)" : ""}</span>
         {(running || waiting) && <span className="dock-dot" aria-hidden="true" />}
         {pct != null && (
           <span className="dock-ring" aria-hidden="true" style={{ ["--p" as string]: `${pct}` }} />
         )}
       </button>
       {open && (
-        <div id="dock" ref={panel} className="dock" role="dialog" aria-label="Exports and AI usage">
+        <div id="dock" ref={panel} className="dock" role="dialog" aria-label="Exports">
           <div className="dock-head">
             <div className="seg" role="tablist" aria-label="Show">
-              <button role="tab" aria-selected={tab === "exports"} className={tab === "exports" ? "on" : ""} onClick={() => setTab("exports")}>
+              <button role="tab" aria-selected={!showUsage} className={!showUsage ? "on" : ""} onClick={() => setTab("exports")}>
                 <History size={13} aria-hidden="true" />Exports{jobs.length ? ` (${jobs.length})` : ""}
               </button>
-              <button role="tab" aria-selected={tab === "usage"} className={tab === "usage" ? "on" : ""} onClick={() => setTab("usage")}>
-                <Bot size={13} aria-hidden="true" />AI usage{pct != null ? ` · ${Math.round(pct)}% left` : ""}
-              </button>
+              {debug && (
+                <button role="tab" aria-selected={showUsage} className={showUsage ? "on" : ""} onClick={() => setTab("usage")}>
+                  <Bot size={13} aria-hidden="true" />Diagnostics{pct != null ? ` · ${Math.round(pct)}% left` : ""}
+                </button>
+              )}
             </div>
             <button type="button" className="iconbtn" onClick={() => setOpen(false)} aria-label="Close"><X size={16} /></button>
           </div>
           <div className="dock-body">
-            {tab === "exports" ? (
+            {!showUsage ? (
               jobs.length ? (
                 <ul className="joblist">
                   {jobs.map((v) => (
@@ -181,8 +186,8 @@ export default function Dock(props: {
               <AiUsage ai={props.ai} aiError={props.aiError} testingAi={props.testingAi} onTestAi={props.onTestAi} />
             )}
           </div>
-          {tab === "exports" && jobs.length > 0 && (
-            <p className="dock-foot"><RotateCcw size={12} aria-hidden="true" />Saved in this browser only. Exports waiting for AI continue by themselves while this site is open.</p>
+          {!showUsage && jobs.length > 0 && (
+            <p className="dock-foot"><RotateCcw size={12} aria-hidden="true" />Saved in this browser only. An export keeps going while this site is open.</p>
           )}
         </div>
       )}
